@@ -1,4 +1,4 @@
-# nanachat fork for sm120 GPUs
+# nanochat fork for sm120 GPUs
 
 **NOTE: This is a fork of the nanochat repo:** https://github.com/karpathy/nanochat
 
