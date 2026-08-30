@@ -26,6 +26,10 @@ def _load_flash_attention_3():
         return None
     try:
         major, _ = torch.cuda.get_device_capability()
+        # FA3 is not available for sm120 yet. return none, otherwise it throws an exception later.
+        if major not in (8, 9):
+            return None
+
         # FA3 kernels are currently compiled for Hopper (sm90), Ada (sm89) and Ampere (sm80/sm86)
         # Blackwell (sm100) needs SDPA fallback until FA3 is recompiled or FA4 is released
         import os
