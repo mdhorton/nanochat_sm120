@@ -16,8 +16,15 @@ This fork is a learning exercise.
 --depth 24
 --device-batch-size 16
 
-4x H100 SXM = 485 toks/sec
-2x H100 SXM = 485 toks/sec
+|             | toks/sec |
+|-------------|-----|
+| 4x H100 SXM | 485 |
+| 2x H100 SXM | 485 | 
+
+| 2x R | vs baseline | mem | bpb      | notes              |
+|------|-------------|-----|----------|--------------------|
+| 340k |             | 11G | 1.468449 | baseline           |
+| 610k | 1.79x       | 11G | 1.479908 | --window-pattern L |
 
 | 2x RTX Pro 6000 WS | vs baseline | mem | bpb      | notes              |
 |--------------------|-------------|-----|----------|--------------------|
