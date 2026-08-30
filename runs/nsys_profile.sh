@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # nsys profile of a few steady-state training steps, one .nsys-rep per rank.
-# Usage: bash runs/shortrun_nsys.sh [--all-ranks] [base_train overrides...]
+# Usage: bash runs/nsys_profile.sh [--all-ranks] [base_train overrides...]
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export NANOCHAT_BASE_DIR=${NANOCHAT_BASE_DIR:-/remote/.nanochat-cache}
