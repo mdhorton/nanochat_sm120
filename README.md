@@ -3,7 +3,7 @@
 **NOTE: This is a fork of the nanochat repo:** https://github.com/karpathy/nanochat
 
 Nanochat targets datacenter H100 (sm90) GPUs. This fork targets consumer/workstation Blackwell GPUs (sm120). These sm120
-GPUs will no doubt be slower. However, the questions I was curious about:
+GPUs will no doubt be slower. However, some questions I was curious about:
 
 - Are there blackwell specific features that can increase performance?
 - How does H100 performance compare against RTX Pro 6000 Blackwell?
@@ -11,15 +11,26 @@ GPUs will no doubt be slower. However, the questions I was curious about:
 
 This fork is a learning exercise.
 
-## toks/sec
+Most of the benchmarks were run with either 2 or 4 GPUs. This was due to the fact that 8 GPUs were harder to find. 4x
+GPUs generally ran about twice as fast as 2x, but cost twice as much. Overll it was a wash in terms of total cost.
 
---depth 24
---device-batch-size 16
+## shortrun.sh
 
-|             | toks/sec |
-|-------------|-----|
-| 4x H100 SXM | 485 |
-| 2x H100 SXM | 485 | 
+These are short test runs that take ~5-10 minutes. Full runs were performed later for more complete validation.
+
+> --depth 24 --device-batch-size 16 --num-iterations 100
+
+| GPUs        | toks/sec | peak mem GB | final bpb | $/hour |
+|-------------|---------:|------------:|----------:|-------:|
+| 2x H100 SXM |      244 |          57 |  1.330220 |   5.00 |
+| 4x H100 SXM |      485 |          54 |  1.330113 |  10.00 |
+| 8x H100 SXM |          |             |           |  20.00 |
+
+| GPUs               | toks/sec | peak mem GB | final bpb | $/hour |
+|--------------------|---------:|------------:|----------:|-------:|
+| 2x RTX Pro 6000 WS |      130 |          57 |  1.328198 |   2.75 |
+| 4x RTX Pro 6000 WS |          |             |           |        |
+| 8x RTX Pro 6000 WS |      248 |          53 |  1.324561 |  10.00 |
 
 | 2x R | vs baseline | mem | bpb      | notes              |
 |------|-------------|-----|----------|--------------------|

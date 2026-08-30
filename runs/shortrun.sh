@@ -21,6 +21,7 @@ FLAGS=(
 
 case "$SM_ARCH" in
     9.0)  FLAGS+=(--fp8) ;;
+    10.0) FLAGS+=(--fp8) ;;
     12.0) FLAGS+=(--fp8 --window-pattern L) ;;
 esac
 
