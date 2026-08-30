@@ -37,6 +37,7 @@ parser = argparse.ArgumentParser(description="Supervised fine-tuning (SFT) the m
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--attn-impl", type=str, default="auto", choices=["auto", "fa3", "sdpa", "flex"], help="attention backend: auto (FA3 if available, else SDPA), or force fa3/sdpa/flex. 'flex' uses FlexAttention for sliding-window layers (sm120 win, requires CUDA)")
 # Model loading
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
@@ -86,6 +87,11 @@ else:
 use_dummy_wandb = args.run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=args.run, config=user_config)
 
+# Attention implementation: --attn-impl forces a backend, default 'auto' keeps the FA3/SDPA autodetect
+if args.attn_impl in ("fa3", "sdpa"):
+    from nanochat.flash_attention import set_impl as set_attn_impl
+    set_attn_impl(args.attn_impl)
+
 # Flash Attention status
 if not HAS_FA3:
     print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback. Training will be less efficient.")
@@ -116,6 +122,14 @@ for name, fallback, source in [
 
 orig_model = model
 model = torch.compile(model, dynamic=False)
+
+# FlexAttention block masks (--attn-impl flex). None keeps the FA3/SDPA path everywhere.
+# Masks are built for args.max_seq_len (the actual T), which may differ from the base model's sequence_len.
+from nanochat.flex_attn import make_block_mask_cache, FlexEvalWrapper
+block_mask_cache = make_block_mask_cache(args.attn_impl, orig_model, device, seq_len=args.max_seq_len)
+block_masks = block_mask_cache.build() if block_mask_cache is not None else None
+if block_mask_cache is not None:
+    print0(f"✓ Using FlexAttention on {block_mask_cache.num_masked_layers()}/{orig_model.config.n_layer} sliding-window layers (full-context layers stay on FA3/SDPA)")
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
@@ -341,7 +355,8 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
-        val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+        eval_model = model if block_mask_cache is None else FlexEvalWrapper(model, block_mask_cache)
+        val_bpb = evaluate_bpb(eval_model, val_loader, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -423,7 +438,7 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
-        loss = model(x, y)
+        loss = model(x, y, block_masks=block_masks)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:

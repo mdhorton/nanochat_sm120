@@ -3,12 +3,12 @@ FlexAttention training path for sm120 (consumer/workstation Blackwell), where FA
 
 Why: without FA3, `nanochat/flash_attention.py` falls back to SDPA, and a sliding window there means
 building a dense TxT bool mask, which drops SDPA onto the mem-efficient backend. Measured on an
-RTX PRO 4000 (B=8 H=10 T=2048 D=128, bf16, fwd+bwd):
+RTX PRO 4000 (B=8 H=10 T=2048 D=128, bf16, fwd+bwd, dev/bench_attention.py):
 
-    SDPA causal                     4.11 ms   <- L layers today
-    SDPA + dense mask, window=512  24.38 ms   <- S layers today (6x slower than no window at all)
-    flex, causal BlockMask          5.30 ms
-    flex, sliding BlockMask (512)   3.00 ms
+    SDPA causal                     3.82 ms   <- L layers today
+    SDPA + dense mask, window=512  23.62 ms   <- S layers today (6x slower than no window at all)
+    flex, causal BlockMask          5.74 ms
+    flex, sliding BlockMask (512)   2.97 ms
 
 So flex wins big on windowed layers and *loses* on dense causal. Layers whose window covers the whole
 sequence therefore keep using the existing FA3/SDPA path (see BlockMaskCache.build returning None).
@@ -97,13 +97,15 @@ class FlexEvalWrapper:
         return self.model(idx, targets, block_masks=self.cache.build(), **kwargs)
 
 
-def make_block_mask_cache(attn_impl, model, device):
+def make_block_mask_cache(attn_impl, model, device, seq_len=None):
     """
     Returns a BlockMaskCache for --attn-impl flex, or None to keep the existing FA3/SDPA path.
-    `model` is the uncompiled GPT (for window_sizes and config).
+    `model` is the uncompiled GPT (for window_sizes and config). `seq_len` overrides
+    model.config.sequence_len when training T differs from it (chat_sft --max-seq-len).
     """
     if attn_impl != "flex":
         return None
     assert torch.cuda.is_available() and str(device).startswith("cuda"), \
         "--attn-impl flex requires CUDA (flex_attention has no usable CPU/MPS training path)"
-    return BlockMaskCache(model.window_sizes, model.config.sequence_len, device)
+    seq_len = model.config.sequence_len if seq_len is None else seq_len
+    return BlockMaskCache(model.window_sizes, seq_len, device)

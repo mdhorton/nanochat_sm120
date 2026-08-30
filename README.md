@@ -54,7 +54,7 @@ of model quality.
 ### 2x RTX Pro 4000
 
 USD cost/hour: 0.50
-best toks/USD: 1.33B
+best toks/USD: 1.35B
 
 | toks/sec | mem GB |      bpb | notes                    |
 |---------:|-------:|---------:|--------------------------|

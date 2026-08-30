@@ -151,6 +151,7 @@ class TestNoRecompiles:
 
         fwd_bwd(lambda q, k, v: flex(q, k, v, block_mask), qkv, grad_out)
         graphs_after_first = dynamo.utils.counters['stats'].get('unique_graphs')
+        assert graphs_after_first is not None, "dynamo 'unique_graphs' counter missing; the check below would be vacuous"
         for _ in range(3):
             fwd_bwd(lambda q, k, v: flex(q, k, v, block_mask), qkv, grad_out)
         assert dynamo.utils.counters['stats'].get('unique_graphs') == graphs_after_first

@@ -16,14 +16,8 @@ Note on test structure:
 import torch
 import pytest
 import nanochat.flash_attention as fa_module
-from nanochat.flash_attention import flash_attn, HAS_FA3
+from nanochat.flash_attention import flash_attn, HAS_FA3, set_impl
 from nanochat.engine import KVCache
-
-
-def set_impl(impl):
-    """Set the implementation override ('fa3', 'sdpa', or None for auto) and re-resolve USE_FA3."""
-    fa_module._override_impl = impl
-    fa_module.USE_FA3 = fa_module._resolve_use_fa3()
 
 
 def run_both_impls(fn):
