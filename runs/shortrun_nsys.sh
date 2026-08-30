@@ -1,6 +1,7 @@
 #!/bin/bash
+
 # nsys profile of a few steady-state training steps, one .nsys-rep per rank.
-# Usage: bash runs/nsysrun.sh [--all-ranks] [base_train overrides...]
+# Usage: bash runs/shortrun_nsys.sh [--all-ranks] [base_train overrides...]
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export NANOCHAT_BASE_DIR=${NANOCHAT_BASE_DIR:-/remote/.nanochat-cache}
@@ -28,7 +29,7 @@ FLAGS=(
     --eval-every -1
     --core-metric-every -1
     --sample-every -1
-    --model-tag nsysrun
+    --model-tag shortrun_nsys
     --profile-start $PROFILE_START
     --profile-steps $PROFILE_STEPS
 )
@@ -39,7 +40,7 @@ case "$ARCH" in
     12.0) FLAGS+=(--fp8 --window-pattern L) ;;
 esac
 
-echo "nsysrun.sh: $NPROC GPU(s), arch $ARCH, tracing $RANKS rank(s) -> $OUTDIR"
+echo "$NPROC GPU(s), arch $ARCH, tracing $RANKS rank(s) -> $OUTDIR"
 
 # torchrun --no-python so each rank execs its own nsys; RANK is set per child process.
 torchrun --standalone --nproc_per_node=$NPROC --no-python \

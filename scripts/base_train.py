@@ -77,6 +77,8 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+parser.add_argument("--profile-start", type=int, default=-1, help="step at which to open the nsys capture range (-1 = disable)")
+parser.add_argument("--profile-steps", type=int, default=3, help="number of steps to capture once profiling starts")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
@@ -411,6 +413,7 @@ grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
+profiling = args.profile_start >= 0 and device_type == "cuda"
 
 # Go!
 while True:
@@ -504,10 +507,18 @@ while True:
 
     # -------------------------------------------------------------------------
     # single training step
+    # nsys capture range: profile profile_steps steady-state steps (see runs/nsysrun.sh)
+    if profiling:
+        if step == args.profile_start:
+            torch.cuda.cudart().cudaProfilerStart()
+        elif step == args.profile_start + args.profile_steps:
+            torch.cuda.cudart().cudaProfilerStop()
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+    if profiling: torch.cuda.nvtx.range_push(f"step{step}")
     for micro_step in range(grad_accum_steps):
+        if profiling: torch.cuda.nvtx.range_push(f"micro{micro_step}")
         loss = model(x, y)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
@@ -516,7 +527,9 @@ while True:
         else:
             loss.backward()
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+        if profiling: torch.cuda.nvtx.range_pop()
     # step the optimizer
+    if profiling: torch.cuda.nvtx.range_push("optim")
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
     muon_weight_decay = get_weight_decay(step)
@@ -538,6 +551,9 @@ while True:
     else:
         optimizer.step()
     model.zero_grad(set_to_none=True)
+    if profiling:
+        torch.cuda.nvtx.range_pop() # optim
+        torch.cuda.nvtx.range_pop() # step
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
     t1 = time.time()
