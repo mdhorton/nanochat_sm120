@@ -19,10 +19,15 @@ This fork is a learning exercise.
 4x H100 SXM = 485 toks/sec
 2x H100 SXM = 485 toks/sec
 
-| 2x RTX Pro 4000 | 2x RTX Pro 6000 WS | notes              |
-|-----------------|--------------------|--------------------|
-| 120k            |                    | baseline           |
-| 185k            |                    | --window-pattern L |
+| 2x RTX Pro 6000 WS | vs baseline | mem | bpb      | notes              |
+|--------------------|-------------|-----|----------|--------------------|
+| 340k               |             | 11G | 1.468449 | baseline           |
+| 610k               | 1.79x       | 11G | 1.479908 | --window-pattern L |
+
+| 2x RTX Pro 4000 | vs baseline | | bpb | notes              |
+|-----------------|-------------|-|-----|--------------------|
+| 120k            |             | |     | baseline           |
+| 185k            |             | |     | --window-pattern L |
 
 ## License
 
