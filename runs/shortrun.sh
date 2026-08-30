@@ -6,7 +6,7 @@ export NANOCHAT_BASE_DIR=${NANOCHAT_BASE_DIR:-/remote/.nanochat-cache}
 source .venv/bin/activate
 
 NPROC=$(nvidia-smi -L 2>/dev/null | wc -l)
-ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d " ")
+SM_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d " ")
 
 FLAGS=(
     --depth 24
@@ -19,7 +19,7 @@ FLAGS=(
     --sample-every -1
 )
 
-case "$ARCH" in
+case "$SM_ARCH" in
     9.0)  FLAGS+=(--fp8) ;;
     12.0) FLAGS+=(--fp8 --window-pattern L) ;;
 esac
