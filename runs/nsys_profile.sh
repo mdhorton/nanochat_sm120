@@ -7,7 +7,7 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export NANOCHAT_BASE_DIR=${NANOCHAT_BASE_DIR:-/remote/.nanochat-cache}
 
 NPROC=$(nvidia-smi -L 2>/dev/null | wc -l)
-ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d " ")
+SM_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d " ")
 VRAM_GB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{printf "%.0f", $1/1024}')
 
 # Model size is picked from VRAM so the same script runs on big and small hosts.
@@ -19,17 +19,12 @@ else
     DBS=8
 fi
 
-# How many ranks to trace. Rank 0 only by default; --all-ranks traces every rank,
-# which is what shows load imbalance and collective wait attribution. Note that the two
-# modes are not comparable on CPU-side launch gaps (see the launcher note below); GPU
-# kernel durations and NCCL timings are unaffected.
+# How many ranks to trace. Rank 0 only by default; --all-ranks traces every rank.
 RANKS=1
 LAUNCHER_NOTE=""
 if [ "$1" = "--all-ranks" ]; then
     RANKS=$NPROC
-    # Concurrent nsys instances fault in _StaticCudaLauncher's driver-API kernel launches
-    # (unspecified launch failure on ranks > 0). Triton's own launcher is unaffected.
-    # Read at import time by torch/_inductor/config.py:45.
+    # Concurrent nsys instances fault in _StaticCudaLauncher's driver-API kernel launches.
     export TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0
     LAUNCHER_NOTE=" (static cuda launcher disabled)"
     shift
@@ -53,13 +48,13 @@ FLAGS=(
     --profile-steps $PROFILE_STEPS
 )
 
-case "$ARCH" in
+case "$SM_ARCH" in
     9.0)  FLAGS+=(--fp8) ;;
     10.0) FLAGS+=(--fp8) ;;
     12.0) FLAGS+=(--fp8 --window-pattern L) ;;
 esac
 
-echo "$NPROC GPU(s), arch $ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS, tracing $RANKS rank(s)$LAUNCHER_NOTE -> $OUTDIR"
+echo "$NPROC GPU(s), arch $SM_ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS, tracing $RANKS rank(s)$LAUNCHER_NOTE -> $OUTDIR"
 
 source .venv/bin/activate
 
