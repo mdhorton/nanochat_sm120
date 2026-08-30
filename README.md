@@ -63,9 +63,12 @@ best toks/USD: 1.35B
 |     164k |   10.2 | 1.685996 | --window-pattern L       |
 |     185k |   11.4 | 1.686771 | --fp8 --window-pattern L |
 |     187k |   11.4 | 1.675918 | --fp8 --attn-impl flex   |
+|     162k |    8.8 | 1.688276 | --nvfp4 --window-pattern L |
+|     164k |   10.7 | 1.692122 | --nvfp4 --nvfp4-lm-head --window-pattern L |
+|     156k |    9.5 | 1.687710 | --nvfp4 --nvfp4-no-bwd-quant --window-pattern L |
 
 FlexAttention gives the sliding-window pattern (SSSL) at the speed of no windowing at all, so the
-speed/quality tradeoff between the last two rows goes away.
+speed/quality tradeoff between `--fp8 --window-pattern L` and `--fp8 --attn-impl flex` goes away.
 
 ### 4x RTX Pro 4000
 
@@ -78,6 +81,18 @@ best toks/USD: 1.11B
 |     211k |   10.8 | 1.677822 | --fp8                    |
 |     278k |    9.6 | 1.682599 | --window-pattern L       |
 |     307k |   10.8 | 1.687786 | --fp8 --window-pattern L |
+
+
+# nvfp4 (Quartet II)
+
+`--nvfp4` trains the transformer linears in NVFP4 using the Quartet II recipe (RTN + 4/6 forward,
+RHT + MS-EDEN backward), torch-native: `torch._scaled_mm` for the FP4 GEMMs and Triton quantizers
+ported from [Quartet-II](https://github.com/IST-DASLab/Quartet-II) (`nanochat/nvfp4_kernels.py`,
+`nanochat/nvfp4.py`). Requires Blackwell (sm100+); torch.compile is mandatory (eager is 3-5x slower).
+Flags: `--nvfp4-lm-head` (also quantize lm_head), `--nvfp4-no-bwd-quant` (bf16 backward).
+Microbench (`python -m scripts.nvfp4_bench --compile`): at d24 shapes nvfp4 fwd+bwd beats bf16 by
+1.1-1.6x (ahead of `--fp8`); at d12 the 768-wide GEMMs are too small and it only reaches bf16 parity
+end-to-end, with ~15% lower peak memory (4-bit saved activations).
 
 ## License
 
