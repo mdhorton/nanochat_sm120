@@ -46,6 +46,10 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
+# NVFP4 training (Quartet II recipe)
+parser.add_argument("--nvfp4", action="store_true", help="enable NVFP4 training (Quartet II recipe, requires Blackwell GPU)")
+parser.add_argument("--nvfp4-lm-head", action="store_true", help="also quantize lm_head with NVFP4")
+parser.add_argument("--nvfp4-no-bwd-quant", action="store_true", help="NVFP4 forward only, bf16 backward")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
@@ -192,6 +196,17 @@ if args.fp8:
         num_fp8 = sum(1 for m in model.modules() if 'Float8' in type(m).__name__)
         num_skipped = num_linear - num_fp8
         print0(f"✓ FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8}/{num_linear} linear layers, skipped {num_skipped} (too small)")
+
+# Convert Linear layers to NVFP4Linear if --nvfp4 is set (Quartet II recipe)
+if args.nvfp4:
+    assert not args.fp8, "--nvfp4 and --fp8 are mutually exclusive"
+    if device_type != "cuda":
+        print0("Warning: NVFP4 training requires CUDA, ignoring --nvfp4 flag")
+    else:
+        from nanochat.nvfp4 import convert_to_nvfp4_training
+        num_nvfp4 = convert_to_nvfp4_training(
+            model, quantize_lm_head=args.nvfp4_lm_head, bwd_quant=not args.nvfp4_no_bwd_quant)
+        print0(f"✓ NVFP4 training enabled (Quartet II) - converted {num_nvfp4} linear layers")
 
 # Context manager to temporarily disable FP8 so that model evaluation remains in BF16
 @contextmanager

@@ -28,8 +28,8 @@ FLAGS=(
 )
 
 case "$SM_ARCH" in
-    9.0|10.0)  FLAGS+=(--fp8) ;;
-    12.0) FLAGS+=(--fp8) ;;&
+    9.0|10.0)  [[ " $* " == *" --nvfp4 "* ]] || FLAGS+=(--fp8) ;;
+    12.0) [[ " $* " == *" --nvfp4 "* ]] || FLAGS+=(--fp8) ;;&
     12.0) FLAGS+=(--window-pattern L) ;;
 esac
 
