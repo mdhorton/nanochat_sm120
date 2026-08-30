@@ -46,6 +46,8 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
+# Attention implementation
+parser.add_argument("--attn-impl", type=str, default="auto", choices=["auto", "fa3", "sdpa", "flex"], help="attention backend: auto (FA3 if available, else SDPA), or force fa3/sdpa/flex. 'flex' uses FlexAttention for sliding-window layers (sm120 win, requires CUDA)")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
@@ -101,6 +103,11 @@ print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 use_dummy_wandb = args.run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
 
+# Attention implementation: --attn-impl forces a backend, default 'auto' keeps the FA3/SDPA autodetect
+if args.attn_impl in ("fa3", "sdpa"):
+    from nanochat.flash_attention import set_impl as set_attn_impl
+    set_attn_impl(args.attn_impl)
+
 # Flash Attention status
 from nanochat.flash_attention import USE_FA3
 using_fa3 = USE_FA3
@@ -113,8 +120,9 @@ else:
     else:
         print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback")
     print0("WARNING: Training will be less efficient without FA3")
-    if args.window_pattern != "L":
+    if args.window_pattern != "L" and args.attn_impl != "flex":
         print0(f"WARNING: SDPA has no support for sliding window attention (window_pattern='{args.window_pattern}'). Your GPU utilization will be terrible.")
+        print0("WARNING: Consider --attn-impl flex, which handles sliding windows with block sparsity.")
         print0("WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.")
     print0("!" * 80)
 
@@ -246,6 +254,16 @@ def disable_fp8(model):
 
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
 model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+
+# FlexAttention block masks (--attn-impl flex). None keeps the FA3/SDPA path everywhere.
+# flex_attention only works inside torch.compile, so this must come after the compile above.
+from nanochat.flex_attn import make_block_mask_cache, FlexEvalWrapper
+block_mask_cache = make_block_mask_cache(args.attn_impl, orig_model, device)
+if block_mask_cache is not None:
+    n_masked = block_mask_cache.num_masked_layers()
+    print0(f"✓ Using FlexAttention on {n_masked}/{orig_model.config.n_layer} sliding-window layers (full-context layers stay on FA3/SDPA)")
+    if n_masked == 0:
+        print0(f"WARNING: --attn-impl flex has no effect with window_pattern='{args.window_pattern}' (no sliding-window layers)")
 
 # -----------------------------------------------------------------------------
 # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.
@@ -425,8 +443,9 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+        eval_model = model if block_mask_cache is None else FlexEvalWrapper(model, block_mask_cache)
         with disable_fp8(model):
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_bpb = evaluate_bpb(eval_model, val_loader, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -519,7 +538,8 @@ while True:
     if profiling: torch.cuda.nvtx.range_push(f"step{step}")
     for micro_step in range(grad_accum_steps):
         if profiling: torch.cuda.nvtx.range_push(f"micro{micro_step}")
-        loss = model(x, y)
+        block_masks = block_mask_cache.build() if block_mask_cache is not None else None
+        loss = model(x, y, block_masks=block_masks)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:

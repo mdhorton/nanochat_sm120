@@ -75,6 +75,14 @@ def _resolve_use_fa3():
 USE_FA3 = _resolve_use_fa3()
 
 
+def set_impl(impl):
+    """Force 'fa3' or 'sdpa' (None = auto). Used by --attn-impl and by the tests."""
+    global _override_impl, USE_FA3
+    _override_impl = impl
+    USE_FA3 = _resolve_use_fa3()
+    return USE_FA3
+
+
 # =============================================================================
 # SDPA helpers
 # =============================================================================

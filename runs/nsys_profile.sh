@@ -51,7 +51,8 @@ FLAGS=(
 case "$SM_ARCH" in
     9.0)  FLAGS+=(--fp8) ;;
     10.0) FLAGS+=(--fp8) ;;
-    12.0) FLAGS+=(--window-pattern L) ;;
+    # match runs/shortrun.sh: sm120 uses FlexAttention rather than avoiding sliding windows
+    12.0) FLAGS+=(--attn-impl flex) ;;
 esac
 
 echo "$NPROC GPU(s), arch $SM_ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS, tracing $RANKS rank(s)$LAUNCHER_NOTE -> $OUTDIR"

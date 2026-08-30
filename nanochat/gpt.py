@@ -24,6 +24,8 @@ from nanochat.optim import MuonAdamW
 
 # Our custom Flash Attention module that automatically uses FA3 when compatible and SDPA fallback otherwise
 from nanochat.flash_attention import flash_attn
+# FlexAttention training path (sm120), used only when block_masks are supplied
+from nanochat.flex_attn import flex_attn_func
 
 @dataclass
 class GPTConfig:
@@ -81,7 +83,7 @@ class CausalSelfAttention(nn.Module):
         self.ve_gate_channels = 12
         self.ve_gate = Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
-    def forward(self, x, ve, cos_sin, window_size, kv_cache):
+    def forward(self, x, ve, cos_sin, window_size, kv_cache, block_mask=None):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -105,7 +107,10 @@ class CausalSelfAttention(nn.Module):
 
         # Flash Attention (FA3 or SDPA fallback)
         # window_size is (left, right) tuple: (N, 0) for causal, (-1, 0) for full context
-        if kv_cache is None:
+        if kv_cache is None and block_mask is not None:
+            # Training with FlexAttention: all masking (causal + window) lives in block_mask
+            y = flex_attn_func(q, k, v, block_mask)
+        elif kv_cache is None:
             # Training: causal attention with optional sliding window
             y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         else:
@@ -147,8 +152,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos_sin, window_size, kv_cache):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
+    def forward(self, x, ve, cos_sin, window_size, kv_cache, block_mask=None):
+        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache, block_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -456,7 +461,7 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', block_masks=None):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -499,7 +504,8 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx).to(x.dtype) if str(i) in self.value_embeds else None
-            x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache)
+            block_mask = None if block_masks is None else block_masks[i]
+            x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache, block_mask)
             if i == backout_layer:
                 x_backout = x
         # Subtract mid-layer residual to remove low-level features before logit projection

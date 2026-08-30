@@ -30,7 +30,8 @@ FLAGS=(
 case "$SM_ARCH" in
     9.0|10.0)  FLAGS+=(--fp8) ;;
     12.0) FLAGS+=(--fp8) ;;&
-    12.0) FLAGS+=(--window-pattern L) ;;
+    # sm120 has no FA3; FlexAttention makes the default SSSL window pattern faster than no windowing
+    12.0) FLAGS+=(--attn-impl flex) ;;
 esac
 
 echo "$NPROC GPU(s), arch $SM_ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS"

@@ -62,6 +62,10 @@ best toks/USD: 1.33B
 |     120k |   11.4 | 1.676669 | --fp8                    |
 |     164k |   10.2 | 1.685996 | --window-pattern L       |
 |     185k |   11.4 | 1.686771 | --fp8 --window-pattern L |
+|     187k |   11.4 | 1.675918 | --fp8 --attn-impl flex   |
+
+FlexAttention gives the sliding-window pattern (SSSL) at the speed of no windowing at all, so the
+speed/quality tradeoff between the last two rows goes away.
 
 ### 4x RTX Pro 4000
 
