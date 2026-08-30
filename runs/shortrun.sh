@@ -6,16 +6,14 @@ export NANOCHAT_BASE_DIR=${NANOCHAT_BASE_DIR:-/remote/.nanochat-cache}
 source .venv/bin/activate
 
 FLAGS=(
-    --depth 12
-    --device-batch-size 8
-    --total-batch-size 524288
-    --eval-every 50
-    --eval-tokens 2097152
+    --depth 24
+    --device-batch-size 16
     --num-iterations 100
+    --eval-every -1
     --core-metric-every -1
     --sample-every -1
-#    --window-pattern L
+    --save-every -1
     --fp8
 )
 
-torchrun --standalone --nproc_per_node=2 -m scripts.base_train -- "${FLAGS[@]}" "$@"
+torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- "${FLAGS[@]}" "$@"

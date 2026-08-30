@@ -13,8 +13,8 @@ This fork is a learning exercise.
 
 ## toks/sec
 
---depth 12
---device-batch-size 8
+--depth 24
+--device-batch-size 16
 
 4x H100 SXM = 485 toks/sec
 2x H100 SXM = 485 toks/sec
