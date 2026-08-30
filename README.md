@@ -1,4 +1,4 @@
-# nanochat fork for sm120 GPUs
+## nanochat fork for sm120 GPUs
 
 **NOTE: This is a fork of the nanochat repo:** https://github.com/karpathy/nanochat
 
@@ -10,6 +10,19 @@ GPUs will no doubt be slower. However, the questions I was curious about:
 - How does the rental cost compare? (eg, cheaper cost per hour but more hours are needed)
 
 This fork is a learning exercise.
+
+## toks/sec
+
+--depth 12
+--device-batch-size 8
+
+4x H100 SXM = 485 toks/sec
+2x H100 SXM = 485 toks/sec
+
+| 2x RTX Pro 4000 | 2x RTX Pro 6000 WS | notes              |
+|-----------------|--------------------|--------------------|
+| 120k            |                    | baseline           |
+| 185k            |                    | --window-pattern L |
 
 ## License
 

@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# uv sync --frozen --extra gpu
-
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export NANOCHAT_BASE_DIR=${NANOCHAT_BASE_DIR:-/remote/.nanochat-cache}
+
+source .venv/bin/activate
 
 FLAGS=(
     --depth 12
@@ -14,8 +14,8 @@ FLAGS=(
     --num-iterations 100
     --core-metric-every -1
     --sample-every -1
-    --window-pattern L
+#    --window-pattern L
     --fp8
 )
 
-.venv/bin/torchrun --standalone --nproc_per_node=2 -m scripts.base_train -- "${FLAGS[@]}" "$@"
+torchrun --standalone --nproc_per_node=2 -m scripts.base_train -- "${FLAGS[@]}" "$@"
