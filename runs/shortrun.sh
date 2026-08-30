@@ -28,9 +28,9 @@ FLAGS=(
 )
 
 case "$SM_ARCH" in
-    9.0)  FLAGS+=(--fp8) ;;
-    10.0) FLAGS+=(--fp8) ;;
-    12.0) FLAGS+=(--fp8 --window-pattern L) ;;
+    9.0|10.0)  FLAGS+=(--fp8) ;;
+    12.0) FLAGS+=(--fp8) ;;&
+    12.0) FLAGS+=(--window-pattern L) ;;
 esac
 
 echo "$NPROC GPU(s), arch $SM_ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS"

@@ -32,20 +32,13 @@ These are short test runs that take ~5 minutes. Full runs were performed later f
 | 4x RTX Pro 6000 WS |          |             |           |        |
 | 8x RTX Pro 6000 WS |      248 |          53 |  1.324561 |  10.00 |
 
-| 2x R | vs baseline | mem | bpb      | notes              |
-|------|-------------|-----|----------|--------------------|
-| 340k |             | 11G | 1.468449 | baseline           |
-| 610k | 1.79x       | 11G | 1.479908 | --window-pattern L |
+### 2x RTX Pro 4000
 
-| 2x RTX Pro 6000 WS | vs baseline | mem | bpb      | notes              |
-|--------------------|-------------|-----|----------|--------------------|
-| 340k               |             | 11G | 1.468449 | baseline           |
-| 610k               | 1.79x       | 11G | 1.479908 | --window-pattern L |
-
-| 2x RTX Pro 4000 | vs baseline | | bpb | notes              |
-|-----------------|-------------|-|-----|--------------------|
-| 120k            |             | |     | baseline           |
-| 185k            |             | |     | --window-pattern L |
+| toks/sec | vs baseline | peak mem GB | final bpb | notes                    |
+|---------:|------------:|------------:|----------:|--------------------------|
+|     112k |             |        10.1 |  1.676463 | baseline (bf16)          |
+|     120k |             |        11.4 |  1.676669 | --fp8                    |
+|     185k |             |        11.4 |  1.686771 | --fp8 --window-pattern L |
 
 ## License
 
