@@ -14,7 +14,7 @@ FLAGS=(
     --num-iterations 100
     --core-metric-every -1
     --sample-every -1
-#    --window-pattern L
+    --window-pattern L
     --fp8
 )
 
