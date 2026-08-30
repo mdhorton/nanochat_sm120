@@ -6,15 +6,34 @@
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export NANOCHAT_BASE_DIR=${NANOCHAT_BASE_DIR:-/remote/.nanochat-cache}
 
-source .venv/bin/activate
-
 NPROC=$(nvidia-smi -L 2>/dev/null | wc -l)
 ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d " ")
+VRAM_GB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{printf "%.0f", $1/1024}')
+
+# Model size is picked from VRAM so the same script runs on big and small hosts.
+if [ "${VRAM_GB:-0}" -ge 70 ]; then
+    DEPTH=24
+    DBS=16
+else
+    DEPTH=12
+    DBS=8
+fi
 
 # How many ranks to trace. Rank 0 only by default; --all-ranks traces every rank,
-# which is what shows load imbalance and collective wait attribution.
+# which is what shows load imbalance and collective wait attribution. Note that the two
+# modes are not comparable on CPU-side launch gaps (see the launcher note below); GPU
+# kernel durations and NCCL timings are unaffected.
 RANKS=1
-if [ "$1" = "--all-ranks" ]; then RANKS=$NPROC; shift; fi
+LAUNCHER_NOTE=""
+if [ "$1" = "--all-ranks" ]; then
+    RANKS=$NPROC
+    # Concurrent nsys instances fault in _StaticCudaLauncher's driver-API kernel launches
+    # (unspecified launch failure on ranks > 0). Triton's own launcher is unaffected.
+    # Read at import time by torch/_inductor/config.py:45.
+    export TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0
+    LAUNCHER_NOTE=" (static cuda launcher disabled)"
+    shift
+fi
 
 OUTDIR=${NANOCHAT_BASE_DIR}/nsys/$(date +%Y%m%d-%H%M%S)
 mkdir -p "$OUTDIR"
@@ -23,8 +42,8 @@ PROFILE_START=15
 PROFILE_STEPS=3
 
 FLAGS=(
-    --depth 24
-    --device-batch-size 16
+    --depth $DEPTH
+    --device-batch-size $DBS
     --num-iterations $((PROFILE_START + PROFILE_STEPS + 2))
     --eval-every -1
     --core-metric-every -1
@@ -40,7 +59,9 @@ case "$ARCH" in
     12.0) FLAGS+=(--fp8 --window-pattern L) ;;
 esac
 
-echo "$NPROC GPU(s), arch $ARCH, tracing $RANKS rank(s) -> $OUTDIR"
+echo "$NPROC GPU(s), arch $ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS, tracing $RANKS rank(s)$LAUNCHER_NOTE -> $OUTDIR"
+
+source .venv/bin/activate
 
 # torchrun --no-python so each rank execs its own nsys; RANK is set per child process.
 torchrun --standalone --nproc_per_node=$NPROC --no-python \
