@@ -57,7 +57,6 @@ esac
 echo "$NPROC GPU(s), arch $SM_ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS, tracing $RANKS rank(s)$LAUNCHER_NOTE -> $OUTDIR"
 
 source .venv/bin/activate
-
 # torchrun --no-python so each rank execs its own nsys; RANK is set per child process.
 torchrun --standalone --nproc_per_node=$NPROC --no-python \
     bash -c '
