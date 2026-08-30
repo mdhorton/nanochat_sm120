@@ -265,6 +265,8 @@ def get_peak_flops(device_name: str) -> float:
         (["5090"], 209.5e12),
         (["4090"], 165.2e12),
         (["3090"], 71e12),
+        # NVIDIA RTX PRO (Blackwell workstation)
+        (["rtx pro 4000", "blackwell"], 221.5e12),
     )
     for patterns, flops in _PEAK_FLOPS_TABLE:
         if all(p in name for p in patterns):
@@ -318,6 +320,8 @@ def get_peak_bandwidth(device_name: str) -> float:
         (["5090"], 1.79e12),
         (["4090"], 1.01e12),
         (["3090"], 936e9),
+        # NVIDIA RTX PRO (Blackwell workstation)
+        (["rtx pro 4000", "blackwell"], 672e9),
     )
     for patterns, bandwidth in _PEAK_BANDWIDTH_TABLE:
         if all(p in name for p in patterns):
