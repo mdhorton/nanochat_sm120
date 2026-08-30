@@ -1,4 +1,4 @@
-## nanochat fork for sm120 GPUs
+# nanochat fork for sm120 GPUs
 
 **NOTE: This is a fork of the nanochat repo:** https://github.com/karpathy/nanochat
 
@@ -14,11 +14,11 @@ This fork is a learning exercise.
 Most of the benchmarks were run with either 2 or 4 GPUs. This was due to the fact that 8 GPUs were harder to find. 4x
 GPUs generally ran about twice as fast as 2x, but cost twice as much. Overll it was a wash in terms of total cost.
 
-## shortrun.sh
+# shortrun.sh
 
 These are short test runs that take ~5-10 minutes. Full runs were performed later for more complete validation.
 
-# --depth 24 --device-batch-size 16 --num-iterations 50
+## --depth 24 --device-batch-size 16 --num-iterations 50
 
 toks/USD: 171M
 
@@ -46,7 +46,7 @@ best toks/USD: 155M
 |     107k |   64.8 | 1.590402 | --window-pattern L       |
 |     129k |   57.2 | 1.581414 | --fp8 --window-pattern L |
 
-# --depth 12 --device-batch-size 8 --num-iterations 50
+## --depth 12 --device-batch-size 8 --num-iterations 50
 
 These GPUs have less VRAM so depth and device-batch-size must be reduced. This increases training speed, but at the cost
 of model quality.
