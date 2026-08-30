@@ -9,14 +9,12 @@ GPUs will no doubt be slower. However, some questions I was curious about:
 - How does H100 performance compare against RTX Pro 6000 Blackwell?
 - How does the rental cost compare? (eg, cheaper cost per hour but more hours are needed)
 
-This fork is a learning exercise.
-
-Most of the benchmarks were run with either 2 or 4 GPUs. This was due to the fact that 8 GPUs were harder to find. 4x
-GPUs generally ran about twice as fast as 2x, but cost twice as much. Overll it was a wash in terms of total cost.
+All benchmarks are Blackwell GPUs, except the H100s.
 
 # shortrun.sh
 
-These are short test runs that take ~5-10 minutes. Full runs were performed later for more complete validation.
+These are short test runs that complete in under ~15 minutes (usually between 5-10 minutes). Full runs are performed
+later for more complete validation.
 
 ## --depth 24 --device-batch-size 16 --num-iterations 50
 
