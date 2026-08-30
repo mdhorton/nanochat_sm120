@@ -11,8 +11,8 @@ SM_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null |
 FLAGS=(
     --depth 24
     --device-batch-size 16
-    --num-iterations 100
-    --eval-every 50
+    --num-iterations 50
+    --eval-every 25
     --eval-tokens 2097152
     --model-tag shortrun
     --core-metric-every -1

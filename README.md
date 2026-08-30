@@ -16,9 +16,9 @@ GPUs generally ran about twice as fast as 2x, but cost twice as much. Overll it 
 
 ## shortrun.sh
 
-These are short test runs that take ~5-10 minutes. Full runs were performed later for more complete validation.
+These are short test runs that take ~5 minutes. Full runs were performed later for more complete validation.
 
-> --depth 24 --device-batch-size 16 --num-iterations 100
+> --depth 24 --device-batch-size 16 --num-iterations 50
 
 | GPUs        | toks/sec | peak mem GB | final bpb | $/hour |
 |-------------|---------:|------------:|----------:|-------:|
