@@ -1,6 +1,8 @@
-# nanochat fork for sm120 GPUs
+## NOTE: This is a fork of the nanochat repo: https://github.com/karpathy/nanochat
 
-**NOTE: This is a fork of the nanochat repo:** https://github.com/karpathy/nanochat
+---
+
+# nanochat for sm120 GPUs
 
 Nanochat targets datacenter H100 (sm90) GPUs. This fork targets consumer/workstation Blackwell GPUs (sm120). These sm120
 GPUs will no doubt be slower. However, some questions I was curious about:
