@@ -13,3 +13,6 @@ Default is now upstream-faithful: no install, S layers take the SDPA mask.
 The install moved out of module scope, so importing nanochat.sm120.nvfp4 (i.e. --nvfp4)
 no longer enables it as a side effect. Zero changes to upstream-owned files -- base_train's
 existing `_windowed_impl is None` predicates already express the switch.
+
+See dev/attention-ideas.md for what attention work is ruled out (FlexAttention, document/varlen
+masking) and what is still open (attention sinks, score softcap, the q/k 1.2 scale).

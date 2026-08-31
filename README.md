@@ -46,7 +46,7 @@ best toks/USD: 155M
 
 ## --depth 12 --device-batch-size 8 --num-iterations 50
 
-These GPUs have less VRAM so depth and device-batch-size must be reduced. This increases training speed, but at the cost
+These GPUs have less VRAM so depth and device-batch-size must be reduced. This increases training speed, at the cost
 of model quality.
 
 ### 2x RTX Pro 4000
@@ -54,16 +54,14 @@ of model quality.
 USD cost/hour: 0.50
 best toks/USD: 1.41B
 
-| toks/sec | mem GB |      bpb | flags                             |                                              |
-|---------:|-------:|---------:|-----------------------------------|----------------------------------------------|
-|     112k |   10.2 | 1.676463 |                                   |                                              |
-|     120k |   11.4 | 1.676669 | --fp8                             |                                              |
-|     164k |   10.2 | 1.685996 | --window-pattern L                |                                              |
-|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L          |                                              |
-|     195k |   11.4 | 1.675813 | --fp8 NANOCHAT_WINDOWED_FLASH=1   | https://github.com/facebookresearch/xformers |                    
-|     234k |   14.0 | 1.681451 | --nvfp4 NANOCHAT_WINDOWED_FLASH=1 | https://github.com/IST-DASLab/Quartet-II     |                                              
-
-The first two rows predate windowed flash: their `SSSL` layers ran through an SDPA mask.
+| toks/sec | mem GB |      bpb | flags                             |                                              
+|---------:|-------:|---------:|-----------------------------------|
+|     112k |   10.2 | 1.676463 |                                   |                                              
+|     120k |   11.4 | 1.676669 | --fp8                             |                                              
+|     164k |   10.2 | 1.685996 | --window-pattern L                |                                              
+|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L          | 
+|     195k |   11.4 | 1.675813 | --fp8 NANOCHAT_WINDOWED_FLASH=1   |                     
+|     234k |   14.0 | 1.681451 | --nvfp4 NANOCHAT_WINDOWED_FLASH=1 |                                          
 
 ### 4x RTX Pro 4000
 
@@ -77,32 +75,39 @@ best toks/USD: 1.11B
 |     278k |    9.6 | 1.682599 | --window-pattern L       |
 |     307k |   10.8 | 1.687786 | --fp8 --window-pattern L |
 
-# windowed flash attention
+## Accepted
+
+### Windowed flash attention
 
 https://github.com/facebookresearch/xformers
 
-FA3 has no sm120 build, so the `SSSL` sliding-window default used to fall back to an explicit SDPA mask (4.7x the cost
-of a flash forward). `nanochat/sm120/attention.py` routes S layers through `aten::_flash_attention_forward` with
-`window_size_left` instead, so `SSSL` now beats `--window-pattern L` by ~5% at identical memory.
-`python -m scripts.probe_attention` times the three arms; `tests/test_attention_window.py` checks the kernel against
-the mask path.
+NANOCHAT_WINDOWED_FLASH=1
 
-**It is opt-in.** Set `NANOCHAT_WINDOWED_FLASH=1` to enable it; unset, the fork's attention behaves exactly like
-upstream nanochat and `base_train` prints upstream's "SDPA has no support for sliding window attention" warning
-instead of the `windowed flash attention` line. The switch is an environment variable rather than a flag because it
-has to reach every entry point, including the eval paths that take no flags. `runs/shortrun.sh`,
-`runs/nsys_profile.sh` and `runs/speedrun_sm120.sh` set it for sm120, so the numbers above still reproduce; every row
-in this README was measured with it on.
+FA3 has no sm120 kernels, so the `SSSL` sliding-window default uses an explicit SDPA mask, which is slow. The 
+`--window-pattern L` helps but does not use sliding windows. 
 
-## rejected
+The windowed
+flash option allows it to use FA2 kernels for the S layers instead of SDPA masking.
+
+This implementation is mostly a small amount of plubing code so that existing FA2 kernels are used for sliding-windows.
+
+The switch is an environment variable rather than a flag because it has to reach every entry point, including the eval
+paths that take no flags. This is an acceptable trade off given that the purpose of this repo is to explore and learn.
+
+## Rejected
+
+### FlexAttention
+
+https://pytorch.org/blog/flexattention/
+
+branch: flex-attention
 
 | toks/sec | mem GB |      bpb | flags                  | 
 |---------:|-------:|---------:|------------------------|
 |     187k |   11.4 | 1.675918 | --fp8 --attn-impl flex |
 
-### flex attention
-
-https://pytorch.org/blog/flexattention/
+Less than 1% toks/sec improvement. It did improve bpb. However, NANOCHAT_WINDOWED_FLASH=1 improved toks/sec
+significantly more while at the same time matching flex attention's bpb improvment.
 
 ## License
 
