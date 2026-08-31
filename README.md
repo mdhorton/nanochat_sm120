@@ -88,10 +88,10 @@ best toks/USD: 1.11B
 NANOCHAT_FA2_WINDOWED_FLASH=1
 
 FA3 has no sm120 kernels, so the `SSSL` sliding-window default uses an explicit SDPA mask, which is very slow. The
-`--window-pattern L` option helps but is less than optimal. This new option allows it to use FA2 kernels for the S
-layers instead of SDPA masking.
+`--window-pattern L` option helps but it's not optimal. This new option allows it to use FA2 kernels for the S layers
+instead of SDPA masking.
 
-This implementation is mostly just some wiring code so that existing FA2 kernels are used for sliding-windows.
+The implementation is mostly just some wiring code so that existing FA2 kernels are used for sliding-windows.
 
 The switch is an environment variable rather than a flag because it has to reach every entry point, including the eval
 paths that take no flags. This is an acceptable trade off given that the purpose of this repo is to explore and learn.
