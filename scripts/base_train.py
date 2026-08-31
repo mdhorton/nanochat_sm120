@@ -131,7 +131,7 @@ else:
     print0("!" * 80)
 
 if args.window_pattern != "L" and flash_attention._windowed_impl is not None:
-    print0(f"✓ windowed flash attention: '{args.window_pattern}' routed through _flash_attention_forward, not an SDPA mask")
+    print0(f"✓ FA2 windowed flash attention: '{args.window_pattern}' routed through _flash_attention_forward, not an SDPA mask")
 
 # -----------------------------------------------------------------------------
 # Tokenizer will be useful for evaluation and also we need the vocab size to init the model
