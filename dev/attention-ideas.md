@@ -4,7 +4,7 @@ Written 2026-08-31 to stop re-litigating FlexAttention. The evidence was scatter
 `flex-attention` branch, README's *Rejected* section, and upstream's `dev/LOG.md`.
 
 **Throughput: there is nothing left to take from FlexAttention.** Its only measured win was over the
-SDPA dense-mask fallback, and `NANOCHAT_WINDOWED_FLASH=1` deleted that fallback and beats it.
+SDPA dense-mask fallback, and `NANOCHAT_FA2_WINDOWED_FLASH=1` deleted that fallback and beats it.
 
 ## Ruled out
 
