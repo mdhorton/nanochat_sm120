@@ -52,7 +52,7 @@ case "$SM_ARCH" in
     9.0)  FLAGS+=(--fp8) ;;
     10.0) FLAGS+=(--fp8) ;;
     # Opt in to the windowed-flash fast path so a profile shows the kernels sm120 actually runs.
-    12.0) export NANOCHAT_WINDOWED_FLASH=1 ;;
+    12.0) export NANOCHAT_FA2_WINDOWED_FLASH=1 ;;
 esac
 
 echo "$NPROC GPU(s), arch $SM_ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS, tracing $RANKS rank(s)$LAUNCHER_NOTE -> $OUTDIR"
