@@ -54,14 +54,14 @@ of model quality.
 USD cost/hour: 0.50
 best toks/USD: 1.41B
 
-| toks/sec | mem GB |      bpb | flags                         | 
-|---------:|-------:|---------:|-------------------------------|
-|     112k |   10.2 | 1.676463 |                               | 
-|     120k |   11.4 | 1.676669 | --fp8                         | 
-|     164k |   10.2 | 1.685996 | --window-pattern L            | 
-|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L      |
-|     173k |   10.2 | 1.676523 | windowed flash (SSSL)         | 
-|     195k |   11.4 | 1.675813 | --fp8 + windowed flash (SSSL) |                                              
+| toks/sec | mem GB |      bpb | flags                        | 
+|---------:|-------:|---------:|------------------------------|
+|     112k |   10.2 | 1.676463 |                              | 
+|     120k |   11.4 | 1.676669 | --fp8                        | 
+|     164k |   10.2 | 1.685996 | --window-pattern L           | 
+|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L     |
+|     195k |   11.4 | 1.675813 | --fp8 (windowed flash SSSL)  |                                              
+|     234k |   14.0 | 1.681451 | --nvfp (windowed flash SSSL) |                                              
 
 The first two rows predate windowed flash: their `SSSL` layers ran through an SDPA mask.
 
@@ -86,6 +86,12 @@ of a flash forward). `nanochat/sm120/attention.py` routes S layers through `aten
 `window_size_left` instead, so `SSSL` now beats `--window-pattern L` by ~5% at identical memory.
 `python -m scripts.probe_attention` times the three arms; `tests/test_attention_window.py` checks the kernel against
 the mask path.
+
+## rejected
+
+### flex attention
+
+https://pytorch.org/blog/flexattention/
 
 ## License
 

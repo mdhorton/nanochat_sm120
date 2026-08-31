@@ -48,6 +48,15 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
+parser.add_argument("--nvfp4", action="store_true", help="enable NVFP4 training via the Quartet-II kernels (requires Blackwell sm_100+; mutually exclusive with --fp8)")
+parser.add_argument("--nvfp4-rne", action="store_true", help="ABLATION: use plain round-to-nearest for the NVFP4 forward instead of Quartet-II's 4/6 rounding. Not part of the stack below -- it takes accuracy away, so --nvfp4 does not turn it on")
+# The four below are the measured NVFP4 stack and --nvfp4 turns all of them on; each takes a
+# --no- form to put back. default=None means "not asked for either way", which is what lets an
+# explicit flag without --nvfp4 still be an error instead of a silent no-op.
+parser.add_argument("--nvfp4-weight-cache", action=argparse.BooleanOptionalAction, default=None, help="on with --nvfp4. quantize NVFP4 weights once per optimizer step instead of every micro-step: +1.8-2.0%% tok/s for +437 MiB at d24 (dev/nvfp4-quartet.md, The weight cache)")
+parser.add_argument("--nvfp4-lt-gemm", action=argparse.BooleanOptionalAction, default=None, help="on with --nvfp4. run the NVFP4 GEMMs through this fork's cuBLASLt launcher instead of torch._scaled_mm: ~0%% on its own, and the seam the two epilogue items need (dev/nvfp4-quartet.md, A1)")
+parser.add_argument("--nvfp4-epilogue-alpha", action=argparse.BooleanOptionalAction, default=None, help="on with --nvfp4. apply the NVFP4 per-tensor scale inside the GEMM epilogue instead of as a separate pass over the output: +0.35%%. Needs the launcher (dev/nvfp4-quartet.md, A2)")
+parser.add_argument("--nvfp4-fuse-wgrad", action=argparse.BooleanOptionalAction, default=None, help="on with --nvfp4. accumulate the NVFP4 weight gradient inside the wgrad GEMM epilogue (beta=1 into an fp32 buffer) instead of by a separate cast-and-add: +4.07%% (dev/nvfp4-quartet.md, A3)")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
@@ -199,6 +208,97 @@ if args.fp8:
         num_skipped = num_linear - num_fp8
         print0(f"✓ FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8}/{num_linear} linear layers, skipped {num_skipped} (too small)")
 
+# Convert Linear layers to NVFP4Linear if --nvfp4 is set (Quartet-II, see nanochat/sm120/nvfp4.py)
+nvfp4_weight_cache = False # set below; guards the per-step cache refresh in the training loop
+nvfp4_main_grads = None    # set below; the fp32 wgrad accumulators, attached/zeroed each step
+
+# Resolve the NVFP4 stack to plain booleans before anything reads it. --nvfp4 means all four,
+# because that is the configuration every number in dev/nvfp4-quartet.md was measured on top of;
+# --no-X takes one back out. Distinguishing "not given" (None) from "given False" is what makes
+# the two error cases below possible instead of silent.
+NVFP4_STACK = ("nvfp4_weight_cache", "nvfp4_lt_gemm", "nvfp4_epilogue_alpha", "nvfp4_fuse_wgrad")
+nvfp4_asked = {n: getattr(args, n) for n in NVFP4_STACK}   # None where the user said nothing
+if args.nvfp4:
+    for name, asked in nvfp4_asked.items():
+        setattr(args, name, True if asked is None else asked)
+    if not args.nvfp4_lt_gemm:
+        # Both epilogue items are changes to a GEMM epilogue only this fork's launcher owns, so
+        # --no-nvfp4-lt-gemm takes them with it. Asking for one of them *and* dropping the
+        # launcher is a contradiction rather than a preference, and says so.
+        for name in ("nvfp4_epilogue_alpha", "nvfp4_fuse_wgrad"):
+            if nvfp4_asked[name]:
+                raise ValueError(f"--{name.replace('_', '-')} needs --nvfp4-lt-gemm: the "
+                                 "epilogue belongs to this fork's launcher, and _scaled_mm has "
+                                 "no way to express it")
+            setattr(args, name, False)
+else:
+    # Every --nvfp4-* modifier is read inside the block below, so without --nvfp4 it would be
+    # accepted and silently do nothing -- the failure mode perf-log.md experiment 16 lost two
+    # arms to.
+    orphans = [n for n, v in nvfp4_asked.items() if v is not None]
+    if args.nvfp4_rne:
+        orphans.append("nvfp4_rne")
+    if orphans:
+        # Echo the form that was actually typed: "--nvfp4-lt-gemm would do nothing" is a
+        # confusing thing to read back when what you passed was --no-nvfp4-lt-gemm.
+        flags = ", ".join(("--no-" if nvfp4_asked.get(n) is False else "--") + n.replace("_", "-")
+                          for n in orphans)
+        raise ValueError(f"--nvfp4 is off, so {flags} would do nothing; pass --nvfp4 or drop "
+                         f"{'them' if len(orphans) > 1 else 'it'}")
+    for name in NVFP4_STACK:
+        setattr(args, name, False)
+
+if args.nvfp4:
+    if args.fp8:
+        raise ValueError("--nvfp4 and --fp8 both replace the Linear layers; pick one")
+    if device_type != "cuda":
+        print0("Warning: NVFP4 training requires CUDA, ignoring --nvfp4 flag")
+    else:
+        import torch.nn as nn
+
+        from nanochat.sm120.nvfp4 import NVFP4Linear, convert_to_nvfp4_training, is_nvfp4_convertible
+
+        num_linear = sum(1 for m in model.modules() if isinstance(m, nn.Linear))
+        convert_to_nvfp4_training(model, four_over_six=not args.nvfp4_rne)
+        converted = [(n, m) for n, m in model.named_modules() if isinstance(m, NVFP4Linear)]
+        skipped = [f"{n}{tuple(m.weight.shape)}" for n, m in model.named_modules()
+                   if isinstance(m, nn.Linear) and not is_nvfp4_convertible(m)]
+        rounding = "RNE" if args.nvfp4_rne else "4/6"
+        print0(f"✓ NVFP4 training enabled ({rounding} forward rounding, RHT+EDEN backward) - "
+               f"converted {len(converted)}/{num_linear} linear layers")
+        if skipped:
+            # Worth seeing rather than inferring: anything left here runs in bf16, and if
+            # lm_head is on the list (padded_vocab_size not a multiple of 128) that is the
+            # single biggest GEMM in the model sitting out.
+            print0(f"  left in bf16 (features not 128-aligned): {', '.join(skipped)}")
+        if args.nvfp4_weight_cache:
+            from nanochat.sm120.nvfp4 import enable_weight_caches
+            from nanochat.sm120.nvfp4 import refresh_weight_caches as refresh_nvfp4_weight_caches
+            nvfp4_weight_cache = True
+            print0(f"  weight cache on for {enable_weight_caches(model)} layers (refreshed once per optimizer step)")
+        if args.nvfp4_lt_gemm:
+            from nanochat.sm120 import fp4_gemm
+            # Built here, not on first use: the launcher is on by default now, so a toolchain
+            # that cannot build it has to fail at startup with the flag to switch off in the
+            # message, rather than from inside the first backward. The *plans* are still
+            # autotuned lazily on first use, and printed after the first step.
+            lt_version = fp4_gemm.preload()
+            fp4_gemm.configure(True, epilogue_alpha=args.nvfp4_epilogue_alpha)
+            alpha_note = ", per-tensor scale in the epilogue" if args.nvfp4_epilogue_alpha else ""
+            print0(f"  fp4 GEMMs routed through cuBLASLt {lt_version} directly{alpha_note}")
+        if args.nvfp4_fuse_wgrad:
+            # Before torch.compile: this registers the buffers the compiled backward writes into.
+            from nanochat.sm120.nvfp4 import enable_wgrad_accum
+            nvfp4_main_grads = enable_wgrad_accum(model)
+            fused = 0 if nvfp4_main_grads is None else len(nvfp4_main_grads.modules)
+            print0(f"  wgrad accumulates in the GEMM epilogue for {fused} layers")
+        # Say what is *off* too. With the stack on by default, an arm that opted out of a piece
+        # is otherwise indistinguishable in the log from one that did not -- and comparing arms
+        # from logs is how every number in dev/nvfp4-quartet.md was read.
+        off = [n for n in NVFP4_STACK if not getattr(args, n)]
+        if off:
+            print0(f"  disabled: {', '.join('--no-' + n.replace('_', '-') for n in off)}")
+
 # Context manager to temporarily disable FP8 so that model evaluation remains in BF16
 @contextmanager
 def disable_fp8(model):
@@ -206,13 +306,17 @@ def disable_fp8(model):
 
     CastConfig is a frozen dataclass, so we can't mutate scaling_type. Instead,
     we swap out Float8Linear modules entirely and restore them after.
+
+    Also covers NVFP4Linear (--nvfp4), which needs the same treatment for the same reason:
+    both replace the Linear layers, and evaluation should be read in BF16 either way. The
+    name is kept as-is to avoid churning the call sites and upstream's diff.
     """
     import torch.nn as nn
 
-    # Find all Float8Linear modules and their locations
-    fp8_locations = []  # list of (parent_module, attr_name, fp8_module)
+    # Find all quantized Linear modules and their locations
+    fp8_locations = []  # list of (parent_module, attr_name, quantized_module)
     for name, module in model.named_modules():
-        if 'Float8' in type(module).__name__:
+        if 'Float8' in type(module).__name__ or 'NVFP4' in type(module).__name__:
             if '.' in name:
                 parent_name, attr_name = name.rsplit('.', 1)
                 parent = model.get_submodule(parent_name)
@@ -536,6 +640,10 @@ while True:
         if profiling: torch.cuda.nvtx.range_pop()
     # step the optimizer
     if profiling: torch.cuda.nvtx.range_push("optim")
+    if nvfp4_main_grads is not None:
+        # After the last backward, before anything reads .grad: the fused wgrad wrote into
+        # these buffers instead, and this is what hands them to the optimizer.
+        nvfp4_main_grads.attach()
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
     muon_weight_decay = get_weight_decay(step)
@@ -556,7 +664,15 @@ while True:
         scaler.update()
     else:
         optimizer.step()
+    if nvfp4_weight_cache:
+        # After step(), never between a forward and its backward: the forward hands these
+        # buffers to save_for_backward and this rewrites them in place.
+        refresh_nvfp4_weight_caches(orig_model)
     model.zero_grad(set_to_none=True)
+    if nvfp4_main_grads is not None:
+        # The epilogue always accumulates (beta=1), so "the first micro-step assigns"
+        # becomes "the buffer starts at zero". zero_grad only dropped the .grad alias.
+        nvfp4_main_grads.zero_()
     if profiling:
         torch.cuda.nvtx.range_pop() # optim
         torch.cuda.nvtx.range_pop() # step

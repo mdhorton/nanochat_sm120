@@ -29,7 +29,7 @@ FLAGS=(
 
 case "$SM_ARCH" in
     9.0|10.0) FLAGS+=(--fp8) ;;
-    12.0) FLAGS+=(--fp8) ;;&
+    12.0) FLAGS+=(--nvfp4) ;;&
     12.0) FLAGS+=() ;;
 esac
 
