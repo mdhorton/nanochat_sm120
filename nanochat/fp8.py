@@ -73,6 +73,11 @@ import torch
 import torch.nn as nn
 
 from nanochat.common import COMPUTE_DTYPE
+# Subclass nanochat's Linear, not nn.Linear: GPT.num_matmul_params() counts
+# isinstance(m, Linear) to derive FLOPs/token, so a Float8Linear that is not one silently
+# drops out of the count (see the class docstring below). gpt.py does not import fp8, so
+# this direction is safe.
+from nanochat.gpt import Linear as _NanochatLinear
 
 # Avoid division by zero when computing scale from an all-zeros tensor
 EPS = 1e-12
@@ -192,11 +197,18 @@ class _Float8Matmul(torch.autograd.Function):
         return grad_input, grad_weight
 
 
-class Float8Linear(nn.Linear):
-    """Drop-in nn.Linear replacement that does FP8 compute.
+class Float8Linear(_NanochatLinear):
+    """Drop-in Linear replacement that does FP8 compute.
 
     Weights and biases remain in their original precision (e.g. fp32/bf16).
     Only the matmul is performed in FP8 via the _Float8Matmul autograd function.
+
+    Subclasses nanochat's Linear (gpt.py) rather than nn.Linear directly. That class is the
+    structural marker GPT.num_matmul_params() counts to derive FLOPs/token; subclassing
+    nn.Linear instead dropped every converted layer from the count and under-reported
+    FLOPs/token by 7.7x at d12 and 10.5x at d20. That fed the bf16_mfu display (cosmetic),
+    wandb's flops_so_far, and --target-flops, where it produced a ~7.7x too long run.
+    We override forward() anyway, so nothing of the parent's behaviour is inherited.
     """
 
     def forward(self, input):
