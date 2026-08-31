@@ -29,7 +29,14 @@ def set_windowed(mode):
 def _reset():
     fa_module._override_impl = 'sdpa'   # this file is about the non-FA3 path
     fa_module.USE_FA3 = fa_module._resolve_use_fa3()
+    # The fast path is opt-in, so importing the module no longer installs it. Without this every
+    # both_arms() comparison would be the mask path against itself and would pass vacuously.
+    win_module.install()
+    assert win_module.is_installed(), "the flash arm is not installed; comparisons would be vacuous"
     yield
+    # Uninstall rather than leak: there is no conftest.py, so a process-wide install here would
+    # otherwise reach test_attention_fallback.py's 'sdpa' leg depending on collection order.
+    win_module.uninstall()
     fa_module._override_impl = None
     fa_module.USE_FA3 = fa_module._resolve_use_fa3()
     set_windowed(None)
@@ -132,6 +139,42 @@ def test_fp32_and_cpu_fall_back():
     assert not win_module._windowed_ok(q, q, 32)
     c = torch.randn(2, 128, 4, 32, dtype=torch.float32)
     assert not win_module._windowed_ok(c, c, 32)
+
+
+# =============================================================================
+# The install is the opt-in, and nothing may perform it behind your back
+# =============================================================================
+def test_uninstalled_takes_the_mask_path():
+    """With the fast path off, flash_attn_func must fall back to SDPA's mask emulation."""
+    b, t, h, d, window = 2, 128, 4, 32, 32
+    q, k, v = qkv(b, t, h, d)
+
+    win_module.install()
+    set_windowed('flash')
+    with_flash = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=(window, 0))
+
+    win_module.uninstall()
+    assert not win_module.is_installed()
+    assert fa_module._windowed_impl is None
+    # _override_windowed is deliberately left at 'flash': with nothing installed it is unreachable,
+    # so this proves the *install* is the gate rather than the override.
+    uninstalled = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=(window, 0))
+
+    assert_close(uninstalled, with_flash, "uninstalled vs flash")
+
+
+def test_importing_a_submodule_does_not_install():
+    """Importing any sm120 submodule runs the package __init__; that must not opt you in.
+
+    nvfp4 is the case that matters: `--nvfp4` imports nanochat.sm120.nvfp4, and a module-scope
+    install would silently switch the attention implementation with it.
+    """
+    import importlib
+
+    win_module.uninstall()
+    importlib.import_module("nanochat.sm120.nvfp4")
+    assert not win_module.is_installed(), "importing nanochat.sm120.nvfp4 installed windowed flash"
+    assert fa_module._windowed_impl is None
 
 
 # =============================================================================

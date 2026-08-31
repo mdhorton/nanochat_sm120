@@ -77,4 +77,22 @@ def windowed_flash(q, k, v, window):
     return _WindowedFlashAttn.apply(q, k, v, window)
 
 
-_fa._windowed_impl = windowed_flash
+def install():
+    """Route causal windowed attention through the flash kernels. Idempotent.
+
+    Kept out of module scope on purpose: importing any sm120 submodule executes this package's
+    __init__, so a bare assignment here would make `--nvfp4` silently re-enable the fast path.
+    The install is the opt-in, so it has to be something a caller does, not something an import
+    does.
+    """
+    _fa._windowed_impl = windowed_flash
+
+
+def uninstall():
+    """Put flash_attention.py back the way upstream leaves it."""
+    _fa._windowed_impl = None
+
+
+def is_installed():
+    """True when flash_attn_func will consult windowed_flash."""
+    return _fa._windowed_impl is windowed_flash

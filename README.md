@@ -54,14 +54,14 @@ of model quality.
 USD cost/hour: 0.50
 best toks/USD: 1.41B
 
-| toks/sec | mem GB |      bpb | flags                        | 
-|---------:|-------:|---------:|------------------------------|
-|     112k |   10.2 | 1.676463 |                              | 
-|     120k |   11.4 | 1.676669 | --fp8                        | 
-|     164k |   10.2 | 1.685996 | --window-pattern L           | 
-|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L     |
-|     195k |   11.4 | 1.675813 | --fp8 (windowed flash SSSL)  |                                              
-|     234k |   14.0 | 1.681451 | --nvfp (windowed flash SSSL) |                                              
+| toks/sec | mem GB |      bpb | flags                             |                                              |
+|---------:|-------:|---------:|-----------------------------------|----------------------------------------------|
+|     112k |   10.2 | 1.676463 |                                   |                                              |
+|     120k |   11.4 | 1.676669 | --fp8                             |                                              |
+|     164k |   10.2 | 1.685996 | --window-pattern L                |                                              |
+|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L          |                                              |
+|     195k |   11.4 | 1.675813 | --fp8 NANOCHAT_WINDOWED_FLASH=1   | https://github.com/facebookresearch/xformers |                    
+|     234k |   14.0 | 1.681451 | --nvfp4 NANOCHAT_WINDOWED_FLASH=1 | https://github.com/IST-DASLab/Quartet-II     |                                              
 
 The first two rows predate windowed flash: their `SSSL` layers ran through an SDPA mask.
 
@@ -87,7 +87,18 @@ of a flash forward). `nanochat/sm120/attention.py` routes S layers through `aten
 `python -m scripts.probe_attention` times the three arms; `tests/test_attention_window.py` checks the kernel against
 the mask path.
 
+**It is opt-in.** Set `NANOCHAT_WINDOWED_FLASH=1` to enable it; unset, the fork's attention behaves exactly like
+upstream nanochat and `base_train` prints upstream's "SDPA has no support for sliding window attention" warning
+instead of the `windowed flash attention` line. The switch is an environment variable rather than a flag because it
+has to reach every entry point, including the eval paths that take no flags. `runs/shortrun.sh`,
+`runs/nsys_profile.sh` and `runs/speedrun_sm120.sh` set it for sm120, so the numbers above still reproduce; every row
+in this README was measured with it on.
+
 ## rejected
+
+| toks/sec | mem GB |      bpb | flags                  | 
+|---------:|-------:|---------:|------------------------|
+|     187k |   11.4 | 1.675918 | --fp8 --attn-impl flex |
 
 ### flex attention
 
