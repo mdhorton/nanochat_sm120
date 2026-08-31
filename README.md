@@ -37,16 +37,16 @@ toks/USD: 171M
 USD cost/hour: 3.00
 best toks/USD: 155M
 
-| toks/sec | mem GB |      bpb | notes                    |
-|---------:|-------:|---------:|--------------------------|
-|      71k |   64.8 | 1.576989 | baseline (bf16)          |
-|      79k |   57.2 | 1.566846 | --fp8                    |
-|     107k |   64.8 | 1.590402 | --window-pattern L       |
-|     129k |   57.2 | 1.581414 | --fp8 --window-pattern L |
+| toks/sec | mem GB | bpb | notes |
+|---------:|-------:|---------:|--------------------------|----------------------------------------------|
+| 71k | 64.8 | 1.576989 | baseline (bf16)          |
+| 79k | 57.2 | 1.566846 | --fp8 |
+| 107k | 64.8 | 1.590402 | --window-pattern L |
+| 129k | 57.2 | 1.581414 | --fp8 --window-pattern L |
 
 ## --depth 12 --device-batch-size 8 --num-iterations 50
 
-These GPUs have less VRAM so depth and device-batch-size must be reduced. This increases training speed, at the cost
+These GPUs have less VRAM so depth and device-batch-size must be reduced. This increases training speed, but at the cost
 of model quality.
 
 ### 2x RTX Pro 4000
@@ -54,14 +54,16 @@ of model quality.
 USD cost/hour: 0.50
 best toks/USD: 1.41B
 
-| toks/sec | mem GB |      bpb | flags                             |                                              
-|---------:|-------:|---------:|-----------------------------------|
-|     112k |   10.2 | 1.676463 |                                   |                                              
-|     120k |   11.4 | 1.676669 | --fp8                             |                                              
-|     164k |   10.2 | 1.685996 | --window-pattern L                |                                              
-|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L          | 
-|     195k |   11.4 | 1.675813 | --fp8 NANOCHAT_WINDOWED_FLASH=1   |                     
-|     234k |   14.0 | 1.681451 | --nvfp4 NANOCHAT_WINDOWED_FLASH=1 |                                          
+| toks/sec | mem GB |      bpb | flags                                 |                                          |
+|---------:|-------:|---------:|---------------------------------------|------------------------------------------|
+|     112k |   10.2 | 1.676463 |                                       |                                          |
+|     120k |   11.4 | 1.676669 | --fp8                                 |                                          |
+|     164k |   10.2 | 1.685996 | --window-pattern L                    |                                          |
+|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L              | upstream baseline                        |
+|     195k |   11.4 | 1.675813 | --fp8 NANOCHAT_FA2_WINDOWED_FLASH=1   |                                          |
+|     234k |   14.0 | 1.681451 | --nvfp4 NANOCHAT_FA2_WINDOWED_FLASH=1 | https://github.com/IST-DASLab/Quartet-II |
+
+The first two rows predate windowed flash: their `SSSL` layers ran through an SDPA mask.
 
 ### 4x RTX Pro 4000
 
@@ -77,19 +79,15 @@ best toks/USD: 1.11B
 
 ## Accepted
 
-### Windowed flash attention
+### FA2 sliding-window kernels
 
-https://github.com/facebookresearch/xformers
+NANOCHAT_FA2_WINDOWED_FLASH=1
 
-NANOCHAT_WINDOWED_FLASH=1
+FA3 has no sm120 kernels, so the `SSSL` sliding-window default uses an explicit SDPA mask, which is very slow. The
+`--window-pattern L` option helps but is less than optimal. This new option allows it to use FA2 kernels for the S
+layers instead of SDPA masking.
 
-FA3 has no sm120 kernels, so the `SSSL` sliding-window default uses an explicit SDPA mask, which is slow. The 
-`--window-pattern L` helps but does not use sliding windows. 
-
-The windowed
-flash option allows it to use FA2 kernels for the S layers instead of SDPA masking.
-
-This implementation is mostly a small amount of plubing code so that existing FA2 kernels are used for sliding-windows.
+This implementation is mostly just some wiring code so that existing FA2 kernels are used for sliding-windows.
 
 The switch is an environment variable rather than a flag because it has to reach every entry point, including the eval
 paths that take no flags. This is an acceptable trade off given that the purpose of this repo is to explore and learn.
@@ -106,7 +104,7 @@ branch: flex-attention
 |---------:|-------:|---------:|------------------------|
 |     187k |   11.4 | 1.675918 | --fp8 --attn-impl flex |
 
-Less than 1% toks/sec improvement. It did improve bpb. However, NANOCHAT_WINDOWED_FLASH=1 improved toks/sec
+Less than 1% toks/sec improvement. It did improve bpb. However, NANOCHAT_FA2_WINDOWED_FLASH=1 improved toks/sec
 significantly more while at the same time matching flex attention's bpb improvment.
 
 ## License
