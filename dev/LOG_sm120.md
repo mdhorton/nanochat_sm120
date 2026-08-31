@@ -12,3 +12,4 @@ bf16 fwd+bwd, ahead of fp8. Fused Triton EDEN kernels (transposed-read + requant
 --fp8 --window-pattern L      186k toks/s
 --fp8 SSSL (windowed flash)   195k toks/s  (+5%; was 120k via SDPA mask)
 bf16: L 165k, SSSL 173k
+--nvfp4 SSSL (windowed flash) 170k toks/s / 9.0GB / bpb 1.6793  (+5% over --nvfp4 -L 162k)

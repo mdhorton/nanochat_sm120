@@ -65,6 +65,7 @@ best toks/USD: 1.41B
 |     162k |    8.8 | 1.688276 | --nvfp4 --window-pattern L                      |
 |     164k |   10.7 | 1.692122 | --nvfp4 --nvfp4-lm-head --window-pattern L      |
 |     156k |    9.5 | 1.687710 | --nvfp4 --nvfp4-no-bwd-quant --window-pattern L |
+|     170k |    9.0 | 1.679255 | --nvfp4 + windowed flash (SSSL)                 |
 
 The first two rows predate windowed flash: their `SSSL` layers ran through an SDPA mask.
 
