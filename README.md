@@ -63,7 +63,7 @@ base flag: none
 |          |        |     |             |                   |
 |          |        |     |             |                   |
 
-#### --fp8
+#### fp8
 
 base flag: --fp8
 

@@ -928,15 +928,18 @@ follow-on that shares one per-tensor scale and is therefore not.
 
 | # | item | measured price | depends on | size |
 |---|---|---|---|---|
-| **B1** | **Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass | ≤148 ms/step (4.1%) direct, and it unblocks B2/B4 | — | M |
+| ~~**B1**~~ | ~~**Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass~~ — **built 2026-08-31, `--nvfp4-scaling delayed`** | ≤148 ms/step (4.1%) direct, **not yet measured end to end**; B2/B4 unblocked | — | M |
 | **B2** | **Fuse the quantize into its producer** so `x` is never re-read in bf16 | the ~68 ms glue gap against fp8; both quantize kernels are at 76-85% DRAM, so bytes are the currency | B1 | L |
 | **B3** | **Hold the RHT sign pattern across the grad-accum window**, re-randomizing per optimizer step | makes `rht128_requant(w)` cacheable — the withdrawn "+21%" claim in *Where the speed comes from* | — | **S** |
 | **B4** | **Fold the eden scratch round-trip** (bf16 scales written, read back, rewritten as fp8) | 35.3 ms + 7,744 launches + most of A6's `cudaMemset` | B1 | M |
 
-B1 is **Python-only**: `four_six_fp4_kernel` already takes the amax as a device pointer, so the
-change is feeding it from a history instead of a reduction. Crib `DelayedScaleState` from
-`refactor`'s `nanochat/sm120/fp8_state.py`. B3 is the cheapest item on either list and has the
-largest unmeasured upside — do it early, but it *is* a change to the gradient estimator.
+B1 was **Python-only** as predicted: `four_six_fp4_kernel` takes the amax as a read-only device
+pointer and `quant_fp4` already accepted an `amax=` override nothing passed, so it is
+`nanochat/sm120/nvfp4_state.py` plus one argument through `_NVFP4Matmul.forward`, with no CUDA
+touched. `DelayedScaleState` came from the fp8 port and now lives in `sm120/delayed_scale.py`,
+generalised over roles and constants. See *Delayed activation scaling* below for what it does and
+what is still unmeasured. B3 is the cheapest item on either list and has the largest unmeasured
+upside — do it early, but it *is* a change to the gradient estimator.
 
 ### C. The shipping gate, which nothing above clears
 
