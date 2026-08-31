@@ -4,7 +4,7 @@ Nothing upstream points into this package -- the arrows only go the other way, s
 karpathy/nanochat owns keep a narrow seam and the fork stays cheap to rebase.
 
 Both fast paths here are **opt-in**, so an unconfigured run behaves exactly like upstream
-nanochat and A/B arms compare what they claim to. Set `NANOCHAT_WINDOWED_FLASH=1` to route
+nanochat and A/B arms compare what they claim to. Set `NANOCHAT_FA2_WINDOWED_FLASH=1` to route
 sliding-window attention through the flash kernels instead of an SDPA mask; `--nvfp4` converts
 the Linear layers. Neither happens on its own.
 
@@ -25,11 +25,11 @@ import os
 
 from . import attention  # noqa: F401  -- the module, not the install; see WINDOWED_FLASH_ENV
 
-WINDOWED_FLASH_ENV = "NANOCHAT_WINDOWED_FLASH"
+WINDOWED_FLASH_ENV = "NANOCHAT_FA2_WINDOWED_FLASH"
 
 
 def _env_opted_in():
-    """Truthy spellings only, so `NANOCHAT_WINDOWED_FLASH=0` reads as off rather than as set."""
+    """Truthy spellings only, so `NANOCHAT_FA2_WINDOWED_FLASH=0` reads as off rather than as set."""
     return os.environ.get(WINDOWED_FLASH_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 

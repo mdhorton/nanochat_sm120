@@ -8,7 +8,7 @@ baseline           120k toks/s
 --fp8 SSSL (windowed flash)   195k toks/s  (+5%; was 120k via SDPA mask)
 bf16: L 165k, SSSL 173k
 
-2026-08-31 windowed flash made opt-in (NANOCHAT_WINDOWED_FLASH=1)
+2026-08-31 windowed flash made opt-in (NANOCHAT_FA2_WINDOWED_FLASH=1)
 Default is now upstream-faithful: no install, S layers take the SDPA mask.
 The install moved out of module scope, so importing nanochat.sm120.nvfp4 (i.e. --nvfp4)
 no longer enables it as a side effect. Zero changes to upstream-owned files -- base_train's
