@@ -70,12 +70,16 @@ The first two rows predate windowed flash: their `SSSL` layers ran through an SD
 USD cost/hour: 1.00
 best toks/USD: 1.11B
 
-| toks/sec | mem GB |      bpb | flags                    |
-|---------:|-------:|---------:|--------------------------|
-|     198k |    9.6 | 1.672383 | baseline (bf16)          |
-|     211k |   10.8 | 1.677822 | --fp8                    |
-|     278k |    9.6 | 1.682599 | --window-pattern L       |
-|     307k |   10.8 | 1.687786 | --fp8 --window-pattern L |
+| toks/sec | mem GB |      bpb | flags                                                         |
+|---------:|-------:|---------:|---------------------------------------------------------------|
+|     198k |    9.6 | 1.672383 | baseline (bf16)                                               |
+|     211k |   10.8 | 1.677822 | --fp8                                                         |
+|     278k |    9.6 | 1.682599 | --window-pattern L                                            |
+|     307k |   10.8 | 1.687786 | --fp8 --window-pattern L                                      |
+|     320k |   10.8 | 1.677705 | --fp8 NANOCHAT_FA2_WINDOWED_FLASH=1                           |                                          
+|     378k |   14.0 | 1.683084 | --nvfp4 NANOCHAT_FA2_WINDOWED_FLASH=1                         | 
+|     334k |    9.0 | 1.664606 | --fp8 --fp8-scaling delayed NANOCHAT_FA2_WINDOWED_FLASH=1     | 
+|     381k |   14.0 | 1.682999 | --nvfp4 --nvfp4-scaling delayed NANOCHAT_FA2_WINDOWED_FLASH=1 | 
 
 ## Accepted
 
