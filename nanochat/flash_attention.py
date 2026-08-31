@@ -56,6 +56,11 @@ HAS_FA3 = _fa3 is not None
 # Override for testing: set to 'fa3', 'sdpa', or None (auto)
 _override_impl = None
 
+# Sliding-window fast path, installed by nanochat.sm120.attention when that package is
+# imported. Takes (q, k, v, window) in (B, T, H, D) and returns the result, or None if the
+# shape/dtype does not qualify. Left None here so this module depends on nothing.
+_windowed_impl = None
+
 
 def _resolve_use_fa3():
     """Decide once whether to use FA3, based on availability, override, and dtype."""
@@ -130,6 +135,13 @@ def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
     """
     if USE_FA3:
         return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+
+    # Sliding window goes straight to the flash kernels, in the (B, T, H, D) layout they already
+    # want -- so this path also skips the two transposes the SDPA fallback needs.
+    if causal and _windowed_impl is not None:
+        out = _windowed_impl(q, k, v, window_size[0])
+        if out is not None:
+            return out
 
     # SDPA fallback: transpose (B, T, H, D) -> (B, H, T, D)
     q = q.transpose(1, 2)

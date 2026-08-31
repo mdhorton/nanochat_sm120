@@ -1,7 +1,5 @@
 ## NOTE: This is a fork of the nanochat repo: https://github.com/karpathy/nanochat
 
----
-
 # nanochat for sm120 GPUs
 
 Nanochat targets datacenter H100 (sm90) GPUs. This fork targets consumer/workstation Blackwell GPUs (sm120). These sm120
@@ -54,30 +52,33 @@ of model quality.
 ### 2x RTX Pro 4000
 
 USD cost/hour: 0.50
-best toks/USD: 1.33B
+best toks/USD: 1.41B
 
-| toks/sec | mem GB |      bpb | notes                    |
-|---------:|-------:|---------:|--------------------------|
-|     112k |   10.2 | 1.676463 | baseline (bf16)          |
-|     120k |   11.4 | 1.676669 | --fp8                    |
-|     164k |   10.2 | 1.685996 | --window-pattern L       |
-|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L |
-|     162k |    8.8 | 1.688276 | --nvfp4 --window-pattern L |
-|     164k |   10.7 | 1.692122 | --nvfp4 --nvfp4-lm-head --window-pattern L |
+| toks/sec | mem GB |      bpb | flags                                           |
+|---------:|-------:|---------:|-------------------------------------------------|
+|     112k |   10.2 | 1.676463 |                                                 |
+|     120k |   11.4 | 1.676669 | --fp8                                           |
+|     164k |   10.2 | 1.685996 | --window-pattern L                              |
+|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L                        |
+|     173k |   10.2 | 1.676523 | windowed flash (SSSL)                           |
+|     195k |   11.4 | 1.675813 | --fp8 + windowed flash (SSSL)                   |
+|     162k |    8.8 | 1.688276 | --nvfp4 --window-pattern L                      |
+|     164k |   10.7 | 1.692122 | --nvfp4 --nvfp4-lm-head --window-pattern L      |
 |     156k |    9.5 | 1.687710 | --nvfp4 --nvfp4-no-bwd-quant --window-pattern L |
+
+The first two rows predate windowed flash: their `SSSL` layers ran through an SDPA mask.
 
 ### 4x RTX Pro 4000
 
 USD cost/hour: 1.00
 best toks/USD: 1.11B
 
-| toks/sec | mem GB |      bpb | notes                    |
+| toks/sec | mem GB |      bpb | flags                    |
 |---------:|-------:|---------:|--------------------------|
 |     198k |    9.6 | 1.672383 | baseline (bf16)          |
 |     211k |   10.8 | 1.677822 | --fp8                    |
 |     278k |    9.6 | 1.682599 | --window-pattern L       |
 |     307k |   10.8 | 1.687786 | --fp8 --window-pattern L |
-
 
 # nvfp4 (Quartet II)
 
@@ -89,6 +90,16 @@ Flags: `--nvfp4-lm-head` (also quantize lm_head), `--nvfp4-no-bwd-quant` (bf16 b
 Microbench (`python -m scripts.nvfp4_bench --compile`): at d24 shapes nvfp4 fwd+bwd beats bf16 by
 1.1-1.6x (ahead of `--fp8`); at d12 the 768-wide GEMMs are too small and it only reaches bf16 parity
 end-to-end, with ~15% lower peak memory (4-bit saved activations).
+
+# windowed flash attention
+
+https://github.com/facebookresearch/xformers
+
+FA3 has no sm120 build, so the `SSSL` sliding-window default used to fall back to an explicit SDPA mask (4.7x the cost
+of a flash forward). `nanochat/sm120/attention.py` routes S layers through `aten::_flash_attention_forward` with
+`window_size_left` instead, so `SSSL` now beats `--window-pattern L` by ~5% at identical memory.
+`python -m scripts.probe_attention` times the three arms; `tests/test_attention_window.py` checks the kernel against
+the mask path.
 
 ## License
 

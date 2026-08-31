@@ -30,10 +30,11 @@ FLAGS=(
 case "$SM_ARCH" in
     9.0|10.0)  [[ " $* " == *" --nvfp4 "* ]] || FLAGS+=(--fp8) ;;
     12.0) [[ " $* " == *" --nvfp4 "* ]] || FLAGS+=(--fp8) ;;&
-    12.0) FLAGS+=(--window-pattern L) ;;
+    12.0) FLAGS+=() ;;
 esac
 
 echo "$NPROC GPU(s), arch $SM_ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS"
+echo "${FLAGS[@]}"
 
 source .venv/bin/activate
 torchrun --standalone --nproc_per_node=$NPROC -m scripts.base_train -- "${FLAGS[@]}" "$@"

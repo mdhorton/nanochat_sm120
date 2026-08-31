@@ -22,6 +22,7 @@ from nanochat.checkpoint_manager import save_checkpoint, load_model, load_optimi
 from nanochat.loss_eval import evaluate_bpb
 import torch.distributed as dist
 from nanochat.flash_attention import HAS_FA3
+import nanochat.sm120  # noqa: F401 -- installs the windowed-flash fast path
 from nanochat.engine import Engine
 from scripts.chat_eval import run_chat_eval
 
