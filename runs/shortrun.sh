@@ -29,9 +29,12 @@ FLAGS=(
 
 case "$SM_ARCH" in
     9.0|10.0) FLAGS+=(--fp8) ;;
-#    12.0) FLAGS+=(--nvfp4) ;;&
-    12.0) FLAGS+=(--fp8 --fp8-scaling delayed) ;;&
-    12.0) export NANOCHAT_FA2_WINDOWED_FLASH=1 ;;
+    12.0) FLAGS+=(--nvfp4) ;;&
+#    12.0) FLAGS+=(--fp8 ) ;;&
+#    12.0) FLAGS+=(--fp8-scaling delayed) ;;&
+    12.0) FLAGS+=(--window-pattern L ) ;;&
+#    12.0) export NANOCHAT_FA2_WINDOWED_FLASH=1 ;;
+    *) ;;
 esac
 
 echo "$NPROC GPU(s), arch $SM_ARCH, ${VRAM_GB}GB -> d$DEPTH dbs$DBS"

@@ -51,19 +51,39 @@ of model quality.
 
 ### 2x RTX Pro 4000
 
-USD cost/hour: 0.50
-best toks/USD: 1.41B
+Most of the tests start here because this is my personal workstion.
 
-| toks/sec | mem GB |      bpb | flags                                 |                                          |
-|---------:|-------:|---------:|---------------------------------------|------------------------------------------|
-|     112k |   10.2 | 1.676463 |                                       |                                          |
-|     120k |   11.4 | 1.676669 | --fp8                                 |                                          |
-|     164k |   10.2 | 1.685996 | --window-pattern L                    |                                          |
-|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L              | upstream baseline                        |
-|     195k |   11.4 | 1.675813 | --fp8 NANOCHAT_FA2_WINDOWED_FLASH=1   |                                          |
-|     234k |   14.0 | 1.681451 | --nvfp4 NANOCHAT_FA2_WINDOWED_FLASH=1 | https://github.com/IST-DASLab/Quartet-II |
+#### bf16
 
-The first two rows predate windowed flash: their `SSSL` layers ran through an SDPA mask.
+base flag: none
+
+| toks/sec | mem GB | bpb | extra flags |                   |
+|---------:|-------:|----:|-------------|-------------------|
+|          |        |     |             |                   |
+|          |        |     |             |                   |
+|          |        |     |             |                   |
+
+#### --fp8
+
+base flag: --fp8
+
+| toks/sec | mem GB |      bpb | extra flags                                         |                   
+|---------:|-------:|---------:|-----------------------------------------------------|
+|     120k |   11.4 | 1.676669 |                                                     |                   
+|     185k |   11.4 | 1.686771 | --window-pattern L                                  |  
+|     195k |   11.4 | 1.675813 | NANOCHAT_FA2_WINDOWED_FLASH=1                       |                   
+|     205k |    9.7 | 1.662816 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed |                   
+
+#### nvfp4
+
+base flag: --nvfp4
+
+| toks/sec | mem GB |      bpb | extra flags                   |                                          
+|---------:|-------:|---------:|-------------------------------|
+|     135k |   14.0 | 1.681464 |                               |                                          
+|     220k |   14.0 | 1.691275 | --window-pattern L            |                                          
+|     234k |   14.0 | 1.681451 | NANOCHAT_FA2_WINDOWED_FLASH=1 |  
+|          |        |          |                               |                                          
 
 ### 4x RTX Pro 4000
 
