@@ -20,6 +20,9 @@ rest. `attention.install()` is available for a caller that wants to decide in co
 | `nvfp4`         | NVFP4 training: `NVFP4Linear` and `convert_to_nvfp4_training`            |
 | `fp4_gemm`      | `--nvfp4-lt-gemm`: this fork's cuBLASLt launcher for the fp4 GEMMs      |
 | `quartet/`      | vendored Quartet-II kernels (arXiv 2601.22813) and their Python wrappers |
+| `fp8_state`     | `--fp8-scaling`: delayed fp8 scaling, from an amax history              |
+| `fp8_backend`   | the `nanochat.fp8.Float8Backend` implementation the above plugs into    |
+| `recipe`        | the sm120 flags, their enablement order, and the per-step hooks          |
 """
 import os
 
@@ -36,4 +39,19 @@ def _env_opted_in():
 if _env_opted_in():
     attention.install()
 
-__all__ = ["attention", "WINDOWED_FLASH_ENV"]
+
+def install_fp8_backend():
+    """Point nanochat.fp8 at the sm120 backend.
+
+    Must run before convert_to_float8_training (Float8Linear.__init__ asks the backend to
+    register its buffers) and therefore before torch.compile. Idempotent.
+    """
+    from nanochat import fp8
+    from nanochat.sm120.fp8_backend import SM120Backend
+
+    if not isinstance(fp8._backend, SM120Backend):
+        fp8.set_backend(SM120Backend())
+    return fp8._backend
+
+
+__all__ = ["attention", "install_fp8_backend", "WINDOWED_FLASH_ENV"]

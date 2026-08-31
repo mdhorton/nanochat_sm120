@@ -35,6 +35,7 @@ from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
 from nanochat import flash_attention
 import nanochat.sm120  # noqa: F401 -- importing it installs the windowed-flash fast path
+from nanochat.sm120 import recipe  # the sm120 performance stack; see nanochat/sm120/recipe.py
 from scripts.base_eval import evaluate_core
 print_banner()
 
@@ -88,15 +89,17 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+parser.add_argument("--seed", type=int, default=42, help="seed for weight init (data order is independent of it). Vary it to get replicate trajectories for a paired numerics A/B; 42 reproduces every earlier run")
 parser.add_argument("--profile-start", type=int, default=-1, help="step at which to open the nsys capture range (-1 = disable)")
 parser.add_argument("--profile-steps", type=int, default=3, help="number of steps to capture once profiling starts")
+recipe.add_args(parser)
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type, seed=args.seed)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -181,32 +184,9 @@ if resuming:
 # -----------------------------------------------------------------------------
 # FP8 training initialization and management (this has to be done before torch.compile)
 
-# Convert Linear layers to Float8Linear if --fp8 is set
-if args.fp8:
-    if device_type != "cuda":
-        print0("Warning: FP8 training requires CUDA, ignoring --fp8 flag")
-    else:
-        # our custom fp8 is simpler than torchao, written for exact API compatibility
-        from nanochat.fp8 import Float8LinearConfig, convert_to_float8_training
-        # from torchao.float8 import Float8LinearConfig, convert_to_float8_training
-        import torch.nn as nn
-
-        # Filter: dims must be divisible by 16 (FP8 hardware requirement) large enough
-        def fp8_module_filter(mod: nn.Module, fqn: str) -> bool:
-            if not isinstance(mod, nn.Linear):
-                return False
-            if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
-                return False
-            if min(mod.in_features, mod.out_features) < 128:
-                return False
-            return True
-
-        fp8_config = Float8LinearConfig.from_recipe_name(args.fp8_recipe)
-        num_linear = sum(1 for m in model.modules() if isinstance(m, nn.Linear))
-        convert_to_float8_training(model, config=fp8_config, module_filter_fn=fp8_module_filter)
-        num_fp8 = sum(1 for m in model.modules() if 'Float8' in type(m).__name__)
-        num_skipped = num_linear - num_fp8
-        print0(f"✓ FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8}/{num_linear} linear layers, skipped {num_skipped} (too small)")
+# Convert Linear layers to Float8Linear if --fp8 is set, and attach whatever else the sm120
+# flags asked for. Returns an inert PerfStack when none of them are passed.
+perf = recipe.apply(model, args, device_type)
 
 # Convert Linear layers to NVFP4Linear if --nvfp4 is set (Quartet-II, see nanochat/sm120/nvfp4.py)
 nvfp4_weight_cache = False # set below; guards the per-step cache refresh in the training loop
@@ -640,6 +620,7 @@ while True:
         if profiling: torch.cuda.nvtx.range_pop()
     # step the optimizer
     if profiling: torch.cuda.nvtx.range_push("optim")
+    perf.after_backward()
     if nvfp4_main_grads is not None:
         # After the last backward, before anything reads .grad: the fused wgrad wrote into
         # these buffers instead, and this is what hands them to the optimizer.

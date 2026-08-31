@@ -1,0 +1,129 @@
+# TODO
+
+## The rest of the sm120 fp8 stack
+
+`--fp8-scaling` is ported (`nanochat/sm120/{recipe,fp8_state,fp8_backend}.py`). Five more flags
+exist in the sibling fork `/remote/projects/pycharm/sm120_nanochat`, branch **`refactor`** — read
+them with `git -C /remote/projects/pycharm/sm120_nanochat show refactor:<path>`. Its
+`dev/perf-log.md` and `dev/perf-log-experiments.md` carry the measurements below.
+
+| flag | d12 | d16 | needs | notes |
+|---|---|---|---|---|
+| `--wgrad-nt` | +8.4% | +8.5% | CUDA ext | largest remaining; costs **+1,680 MiB** |
+| `--pin-gemm all` | +6.0% | +0.8% | CUDA ext | −512 MiB; collapses with depth |
+| `--fp8-weight-cache` | +1.0% | +1.5% | — | Python-only; +218–448 MiB |
+| `--fuse-wgrad-accum` | +0.7–1.9% | +1.4% | CUDA ext | TE's `fuse_wgrad_accumulation` |
+| `--muon-autotune` | +0.7% | +0.7% | — | precision-independent; `--nvfp4` can take it too |
+
+Marginals do not add — the donor's six compound to +22.7% against +18.1% measured at d16. The
+full stack measured **240,038 tok/s** at d12/dbs 8/2 GPU against 180,890 with none of it.
+
+`fp8_state.py` was cut in half on the way in: `WeightCastCache`, `WgradAccumStore` and their
+factories are the two Python-only rows above. `fp8_backend.py` inherits `mm_fwd`/`mm_dgrad`/
+`wgrad` unchanged; the donor overrides all three.
+
+### The CUDA-extension prerequisite, and its trap
+
+`dev/custom_gemm/pinned_gemm.cu` → `nanochat/sm120/csrc/pinned_gemm.cu`. Its build helper must
+**not** reuse `quartet.ext.resolve_cuda_home()`, which is major-matching and resolves torch's
+cu12.8. Half of what `--pin-gemm`/`--wgrad-nt` are worth is that the extension links the *system*
+`libcublasLt.so.13.6.0.2`: under 12.8 every fp8 GEMM lands on `sm89_xmma_*` (Ada kernels on a
+Blackwell card) instead of `nvjet_sm120_*`. Confirmed here — a `--nvfp4` run logs
+`fp4 GEMMs routed through cuBLASLt 120804`, i.e. this repo's launcher runs 12.8.4, which is the
+right choice for *that* extension (one library shared with `_scaled_mm`) and the wrong one for the
+pinned fp8 GEMMs. Acceptance criterion:
+`objdump -p <build_dir>/pinned_gemm.so | grep NEEDED` shows `libcublasLt.so.13`. Also save and
+restore `CUDA_HOME` around the build (the quartet extension mutates it globally) and key the build
+directory on the toolkit, not just on torch's CUDA version.
+
+Guard against a pinning arm that pinned nothing: a build failure falls back to `_scaled_mm` while
+still printing `✓`, and reads ~2.5% low. Port the donor's three guards (`ExtensionUnavailable`
+raise, per-shape stderr warning, and a `report_once` that says so when pinning is on but no plans
+were built).
+
+### The design decision, deferred
+
+`--fp8-weight-cache` and `--fuse-wgrad-accum` each add an `after_step` hook, at which point
+`scripts/base_train.py` has two sets of per-step hooks at one call site — `perf.*` beside the
+inline `nvfp4_main_grads` / `refresh_nvfp4_weight_caches` calls. That is the failure mode
+`recipe.py` exists to prevent. Resolve it then by **subsuming** the nvfp4 wiring into `recipe.py`
+(moving it verbatim; `_apply_fp8`/`_apply_nvfp4` as separate bodies sharing one hook surface), not
+by leaving both.
+
+Build the regression net first: `tests/test_nvfp4.py` never imports `scripts.base_train`, so
+nothing currently covers that wiring. Capture a CLI-contract golden — stdout, stderr and exit code
+for ~10 flag combinations including all three error paths (`--nvfp4 --no-nvfp4-lt-gemm
+--nvfp4-epilogue-alpha`, an orphan `--nvfp4-weight-cache`, `--nvfp4 --fp8`) — before the move and
+replay it after.
+
+`recipe.resolve()` was deliberately not ported: with `--pin-wgrad` dropped it had nothing to
+normalize. Add it back when a flag needs cross-validation, and call it from `base_train` before
+`user_config` is snapshotted so checkpoints record effective values.
+
+### Not to port
+
+- `--fp4-fwd` — killed for good: +0.0147 bpb at ratio 12 against a 3.9% saving, a ~4× net loss.
+- `--pin-wgrad` — deprecated alias for a flag this repo never had.
+- `--compile-mode` — neutral to −1.2%, and 122–424 s of compile.
+- `cublaslt_algos.cu` — only used by an unported probe.
+
+### The cuBLAS pin, deliberately not done
+
+The donor recommends `[tool.uv] override-dependencies = ["nvidia-cublas==13.6.0.2"]` against a
+−35% collapse it measured on cuBLAS 13.0.0.19. That version reaches a venv only through a torch
+**cu130** wheel; this repo is on 2.9.1+cu128 with `nvidia-cublas-cu12`, so the pin is a cu13
+package name in a cu12 graph — a no-op at best, unresolvable at worst.
+
+The real exposure here is the mirror image: `/usr/local/cuda` is a symlink (currently 13.3, with
+`libcublasLt.so.13.6.0.2`), so a system update could silently repoint what the JIT extensions link.
+Defend that with a `cublaslt_version()` print and a `< 130600` warning, not dependency surgery.
+**Revisit the day this repo moves to a cu130 torch**, when the pin becomes mandatory.
+
+## Delayed scaling for `--nvfp4` (queue B1 in dev/nvfp4-quartet.md)
+
+`DelayedScaleState` now exists, and its state machinery is precision-agnostic: a history ring, a
+margin, and model-wide `[2 fields, 3 roles, L]` buffers registered so the compiled graph reads
+them. Only the last hop differs — fp8 hands a scale to `_scaled_mm`, nvfp4 hands an amax to the
+Quartet kernels, which already take it as a device tensor (`quartet/quant.py:25`,
+`four_six_fp4(o, s, t, x, amax, scale_override)`) and carry a `scale_override` escape hatch.
+`NVFP4Linear` holds a per-layer `scratch_amax` today (`nvfp4.py:242`); what is worth reusing is the
+model-wide flat layout, which makes the per-step update a handful of kernels instead of 3×L.
+
+Worth ≤148 ms/step (4.1%) directly — the `vector_norm` amax pre-pass is 204.4 ms over 2,644
+launches under nvfp4 against 56.0 ms over 52 under fp8 — and it unblocks B2 (fuse the quantize into
+its producer, ~68 ms) and B4 (fold the eden scratch round-trip, 35.3 ms + 7,744 launches).
+
+Caveats: it is numerics-affecting on that arm, so it lands behind the C3/C4 gate and starts its own
+battery — the rule being to start one as soon as the *first* such item lands, since a failed
+battery over four changes does not say which one failed. Only the per-tensor scale is delayed; the
+per-16 e4m3 block scales are computed in-kernel and untouched, so the perturbation is smaller in
+kind than fp8's. That is reasoning, not measurement.
+
+## Measurement harness
+
+Not ported, and `dev/nvfp4-quartet.md` says so: `scripts/profile_train.py`, `kernel_report.py`,
+`ncu_report.py`, `gpu_idle_report.py` and `nanochat/sm120/profiling.py`. Every ms/step figure in
+that file and in this one was measured with them. `kernel_report.py` ranks by *headroom*
+(`time_share × (1 − max(SM%,DRAM%)/100)`) as well as by time, which is what finds a tunable kernel
+rather than a big one; `gpu_idle_report.py`'s docstring notes the CUDA-graph verdict was reached at
+the fp8 launch count and needs re-answering for NVFP4's 1.7× launches.
+
+Porting them would also let `PerfStack.after_backward` carry an NVTX range, and would fix two
+dangling references: `scripts/arm_batch.sh`'s header cites `dev/perf-log.md`, and
+`dev/nvfp4-quartet.md` cites "experiment 18/24/25" — none of which exist in this repo.
+
+Note `recipe.add_args` deliberately omits the donor's `--profile-steps`: this repo already defines
+that flag (`base_train.py:92`, paired with `--profile-start`) and argparse raises on the duplicate.
+When the harness lands, have `PerfStack` read the existing flags rather than adding its own.
+
+## Verification debt
+
+`--fp8` on this box is **not** bit-reproducible across runs. Two runs of identical code at d12/dbs
+8/2 GPU agree at steps 0–2 and then drift, reaching 7.4e-5 in the loss by step 19. The donor's
+determinism table calls `--fp8` deterministic, but it checked three steps — too short to see this.
+Consequences:
+
+- A "same loss curve" gate needs a control pair to calibrate the drift; it cannot be read alone.
+- The `--nvfp4` C1/C2 batteries were designed against the assumption that fp8 is the deterministic
+  control arm. That assumption is weaker than recorded — worth re-reading those conclusions.
+- Suspect DDP/NCCL reduction order. Untested: whether a 1-GPU run is reproducible.

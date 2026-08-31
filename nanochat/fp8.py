@@ -123,6 +123,79 @@ def _to_col_major(x):
     return x.t().contiguous().t()
 
 
+# =============================================================================
+# Backend seam
+# =============================================================================
+# The three GEMMs below are all of FP8 training, but *how* each operand is quantized and which
+# kernel runs each matmul is where accelerator-specific work lives — delayed scaling, cached
+# weight casts, fused gradient accumulation, tuned cuBLASLt algorithms. Rather than branch on
+# each of those here, this module calls a backend and ships a default that does exactly what
+# the docstring above describes. nanochat/sm120 installs its own; see dev/LOG_sm120.md.
+#
+# Per-layer tensors deliberately do NOT live on the backend object. A scale has to reach the
+# compiled graph as a plain buffer input: Inductor's tuned_scaled_mm lowering cannot take an
+# in-graph select as scale_a, and a Python-side tensor cache captures a FakeTensor on the first
+# trace so the second compile dies with "Mixing fake modes NYI". They travel instead as an
+# opaque `state` bundle, built by layer_state() and passed straight back, which this module
+# never inspects.
+
+
+class Float8Backend:
+    """The substitution points for the three FP8 GEMMs. Default = plain dynamic scaling."""
+
+    def init_layer(self, layer):
+        """Register any per-layer buffers this backend needs. Must run before torch.compile."""
+
+    def layer_state(self, layer):
+        """The opaque per-layer bundle handed back to the methods below, or None."""
+        return None
+
+    def quantize(self, x, fp8_dtype, role, state):
+        """Quantize one operand. role is 'in', 'w' or 'go'."""
+        return _to_fp8(x, fp8_dtype)
+
+    def weight_operands(self, weight, state):
+        """(fp8 weight, inverse scale, column-major copy or None to build one in backward)."""
+        w_fp8, w_inv = _to_fp8(weight, torch.float8_e4m3fn)
+        return w_fp8, w_inv, None
+
+    def mm_fwd(self, in_fp8, w_t, in_inv, w_inv, out_dtype, state=None):
+        """`state` is this layer's opaque bundle, ignored here. It exists for backends that
+        carry extra per-layer operands for this GEMM."""
+        # use_fast_accum=True accumulates the dot products in lower precision.
+        # Slightly less accurate but measurably faster. Standard practice for
+        # the forward pass; we use False in backward for more precise gradients.
+        return torch._scaled_mm(in_fp8, w_t, scale_a=in_inv, scale_b=w_inv,
+                                out_dtype=out_dtype, use_fast_accum=True)
+
+    def mm_dgrad(self, go_fp8, w_col, go_inv, w_inv, out_dtype):
+        return torch._scaled_mm(go_fp8, w_col, scale_a=go_inv, scale_b=w_inv,
+                                out_dtype=out_dtype, use_fast_accum=False)
+
+    def wgrad(self, go_fp8, in_fp8, go_inv, in_inv, out_dtype, state):
+        """grad_weight, or None if this backend accumulated it somewhere else."""
+        # go_fp8 is [B, N] contiguous, we need go.T = [N, B] as first arg.
+        # Transposing gives column-major, but first arg needs row-major,
+        # so we must call .contiguous() to physically rearrange the memory.
+        go_T = go_fp8.t().contiguous()   # [N, B] row-major
+        in_col = _to_col_major(in_fp8)   # [B, K] column-major
+        return torch._scaled_mm(go_T, in_col, scale_a=go_inv, scale_b=in_inv,
+                                out_dtype=out_dtype, use_fast_accum=False)
+
+
+_backend = Float8Backend()
+
+
+def set_backend(backend):
+    """Install the FP8 backend, or None to restore the default. Before torch.compile.
+
+    Also before convert_to_float8_training: Float8Linear.__init__ asks the backend to register
+    its buffers, so a backend installed after conversion never sees the layers.
+    """
+    global _backend
+    _backend = Float8Backend() if backend is None else backend
+
+
 # allow_in_graph tells torch.compile to treat this as an opaque operation —
 # dynamo won't try to decompose it into smaller ops. See the module docstring
 # for how this differs from torchao's tensor subclass approach.
@@ -135,66 +208,51 @@ class _Float8Matmul(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_2d, weight):
+    def forward(ctx, input_2d, weight, state=None):
+        backend = _backend
         # Quantize both operands to e4m3 (higher precision format)
-        input_fp8, input_inv = _to_fp8(input_2d, torch.float8_e4m3fn)
-        weight_fp8, weight_inv = _to_fp8(weight, torch.float8_e4m3fn)
-        ctx.save_for_backward(input_fp8, input_inv, weight_fp8, weight_inv)
+        input_fp8, input_inv = backend.quantize(input_2d, torch.float8_e4m3fn, "in", state)
+        # `weight` stays an input even when the backend returns a cast it made earlier: it is
+        # the slot backward returns grad_weight into.
+        weight_fp8, weight_inv, w_col = backend.weight_operands(weight, state)
+        ctx.save_for_backward(input_fp8, weight_fp8)
+        # The inverse scales are stashed on ctx rather than saved: a backend may hand back
+        # views into buffers its own backward mutates, which share a version counter with
+        # them, and save_for_backward would reject those on the next backward. They need no
+        # grad tracking, so ctx is the right place for them and for the opaque state.
+        ctx.inv_scales = (input_inv, weight_inv)
+        ctx.w_col = w_col
+        ctx.state = state
 
         # output = input @ weight.T
         # input_fp8 is [B, K] contiguous = row-major (good for first arg)
         # weight_fp8 is [N, K] contiguous, so weight_fp8.t() is [K, N] with
         # strides (1, K) = column-major (good for second arg, no copy needed!)
-        output = torch._scaled_mm(
-            input_fp8,
-            weight_fp8.t(),
-            scale_a=input_inv,
-            scale_b=weight_inv,
-            out_dtype=input_2d.dtype,
-            # use_fast_accum=True accumulates the dot products in lower precision.
-            # Slightly less accurate but measurably faster. Standard practice for
-            # the forward pass; we use False in backward for more precise gradients.
-            use_fast_accum=True,
-        )
-        return output
+        return backend.mm_fwd(input_fp8, weight_fp8.t(), input_inv, weight_inv, input_2d.dtype,
+                              state=state)
 
     @staticmethod
     def backward(ctx, grad_output):
-        in_fp8, in_inv, w_fp8, w_inv = ctx.saved_tensors
+        backend = _backend
+        in_fp8, w_fp8 = ctx.saved_tensors
+        in_inv, w_inv = ctx.inv_scales
 
         # === GEMM 1: grad_input = grad_output @ weight ===
         # Shapes: [B, N] @ [N, K] -> [B, K]
         # Gradients use e5m2 (wider range), weights use e4m3 (higher precision)
-        go_fp8, go_inv = _to_fp8(grad_output, torch.float8_e5m2)
+        go_fp8, go_inv = backend.quantize(grad_output, torch.float8_e5m2, "go", ctx.state)
         # go_fp8 is [B, N] contiguous = row-major, good for first arg
         # w_fp8 is [N, K] contiguous = row-major, need column-major for second arg
-        w_col = _to_col_major(w_fp8)
-        grad_input = torch._scaled_mm(
-            go_fp8,
-            w_col,
-            scale_a=go_inv,
-            scale_b=w_inv,
-            out_dtype=grad_output.dtype,
-            use_fast_accum=False,
-        )
+        w_col = _to_col_major(w_fp8) if ctx.w_col is None else ctx.w_col
+        grad_input = backend.mm_dgrad(go_fp8, w_col, go_inv, w_inv, grad_output.dtype)
 
         # === GEMM 2: grad_weight = grad_output.T @ input ===
         # Shapes: [N, B] @ [B, K] -> [N, K]
-        # go_fp8 is [B, N] contiguous, we need go.T = [N, B] as first arg.
-        # Transposing gives column-major, but first arg needs row-major,
-        # so we must call .contiguous() to physically rearrange the memory.
-        go_T = go_fp8.t().contiguous()  # [N, B] row-major
-        in_col = _to_col_major(in_fp8)    # [B, K] column-major
-        grad_weight = torch._scaled_mm(
-            go_T,
-            in_col,
-            scale_a=go_inv,
-            scale_b=in_inv,
-            out_dtype=grad_output.dtype,
-            use_fast_accum=False,
-        )
+        # None when the backend accumulated it itself, in which case autograd's own
+        # cast-and-add accumulation into .grad never runs.
+        grad_weight = backend.wgrad(go_fp8, in_fp8, go_inv, in_inv, grad_output.dtype, ctx.state)
 
-        return grad_input, grad_weight
+        return grad_input, grad_weight, None
 
 
 class Float8Linear(_NanochatLinear):
@@ -211,6 +269,10 @@ class Float8Linear(_NanochatLinear):
     We override forward() anyway, so nothing of the parent's behaviour is inherited.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _backend.init_layer(self)
+
     def forward(self, input):
         # Cast input to COMPUTE_DTYPE (typically bf16) since _scaled_mm expects
         # reduced precision input, and we no longer rely on autocast to do this.
@@ -218,7 +280,7 @@ class Float8Linear(_NanochatLinear):
         # _scaled_mm only works on 2D tensors, so flatten batch dimensions
         orig_shape = input.shape
         input_2d = input.reshape(-1, orig_shape[-1])
-        output = _Float8Matmul.apply(input_2d, self.weight)
+        output = _Float8Matmul.apply(input_2d, self.weight, _backend.layer_state(self))
         output = output.reshape(*orig_shape[:-1], output.shape[-1])
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)

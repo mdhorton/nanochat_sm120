@@ -1,0 +1,124 @@
+"""One place that owns the sm120 flags, the enablement order and the per-step hooks.
+
+scripts/base_train.py keeps three calls instead of the flag plumbing:
+
+    recipe.add_args(parser)                        # before parse_args
+    perf = recipe.apply(model, args, device_type)  # before torch.compile
+    perf.after_backward()                          # between the last backward and the step
+
+The ordering inside a step is load-bearing and documented on the method that owns it: the amax
+update has to see this step's readings before the weights move. Getting it wrong is silent --
+the loss still falls, just onto stale scales -- which is why it lives here rather than at a
+hand-placed site.
+
+Only --fp8-scaling is ported so far; see TODO.md for the rest of the stack this file is the
+landing surface for.
+"""
+import torch.nn as nn
+
+from nanochat.common import is_ddp_initialized, print0
+
+
+def add_args(parser):
+    """The sm120 flags. Every one is opt-in; a run that passes none gets upstream behaviour."""
+    g = parser.add_argument_group("sm120 performance stack")
+    g.add_argument("--fp8-scaling", type=str, default="dynamic",
+                   choices=["dynamic", "delayed", "static-spike"],
+                   help="fp8 scale source. 'delayed' scales from an amax history instead of the current tensor, so the cast is not gated by a reduction and each quantized tensor is read once instead of twice: +10.7%% at d12. 'static-spike' replaces the amax with a fixed constant: MEASUREMENT ONLY, the gradients are wrong, it exists to price the ceiling that 'delayed' chases")
+    g.add_argument("--fp8-amax-history", type=int, default=16,
+                   help="--fp8-scaling delayed: how many past steps the scale is the max over. Longer is more robust to a spike, slower to follow a trend")
+    g.add_argument("--fp8-amax-margin", type=float, default=2.0,
+                   help="--fp8-scaling delayed: headroom divisor on the scale, i.e. how far the amax may grow in one step before the cast clips. Nearly free (fp8 is floating point, so this costs range at the bottom, not mantissa bits); 1.0 leaves no room at all")
+    g.add_argument("--fp8-amax-allreduce", action="store_true",
+                   help="--fp8-scaling delayed: all-reduce the amaxes across ranks so every rank picks the same scale. Off by default -- the scale is exactly inverted by _scaled_mm, so per-rank divergence changes only rounding")
+    g.add_argument("--fp8-exclude", type=str, default="",
+                   help="comma-separated Linear names to keep in bf16 under --fp8, matched against the last component of the module fqn (e.g. 'lm_head'). Each fp8 Linear costs an amax+cast+transpose pass over its activations; for a layer whose GEMM saving is small relative to that traffic, bf16 can win")
+    return g
+
+
+def module_filter(args):
+    """The fp8 conversion filter: hardware limits plus whatever --fp8-exclude names."""
+    excluded = {n.strip() for n in args.fp8_exclude.split(",") if n.strip()}
+
+    def keep(mod, fqn):
+        if not isinstance(mod, nn.Linear):
+            return False
+        if fqn.split(".")[-1] in excluded:              # --fp8-exclude
+            return False
+        if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
+            return False                                # fp8 hardware requirement
+        if min(mod.in_features, mod.out_features) < 128:
+            return False                                # too small to pay for the casts
+        return True
+
+    return keep, excluded
+
+
+def apply(model, args, device_type):
+    """Convert the model to fp8 and attach whatever the flags asked for. Before torch.compile.
+
+    Returns a PerfStack even when nothing is enabled, so the caller's step loop is
+    unconditional. Everything here registers buffers the compiled graph reads, which is why it
+    cannot be deferred past the torch.compile call.
+    """
+    import nanochat.sm120 as sm120
+    from nanochat.fp8 import Float8LinearConfig, convert_to_float8_training
+    from nanochat.sm120 import fp8_state
+
+    stack = PerfStack()
+
+    if not args.fp8:
+        if args.fp8_scaling != "dynamic":
+            print0(f"Warning: --fp8-scaling {args.fp8_scaling} needs --fp8, ignoring")
+        return stack
+    if device_type != "cuda":
+        print0("Warning: FP8 training requires CUDA, ignoring --fp8 flag")
+        return stack
+
+    # Must precede the conversion: Float8Linear.__init__ asks the backend to register its
+    # buffers, so a backend installed afterwards never sees the layers.
+    sm120.install_fp8_backend()
+    if args.fp8_scaling == "static-spike":
+        fp8_state.set_static_spike(True)
+        print0("!! --fp8-scaling static-spike: gradients are WRONG, throughput measurement only")
+
+    keep, excluded = module_filter(args)
+    num_linear = sum(1 for m in model.modules() if isinstance(m, nn.Linear))
+    convert_to_float8_training(model, config=Float8LinearConfig.from_recipe_name(args.fp8_recipe),
+                               module_filter_fn=keep)
+    num_fp8 = sum(1 for m in model.modules() if "Float8" in type(m).__name__)
+    excl_note = f", excluded {sorted(excluded)}" if excluded else ""
+    print0(f"✓ FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8}/{num_linear} "
+           f"linear layers, skipped {num_linear - num_fp8} (too small){excl_note}")
+
+    if args.fp8_scaling == "delayed":
+        stack.scales = fp8_state.enable_delayed_scaling(
+            model,
+            history_len=args.fp8_amax_history,
+            margin=args.fp8_amax_margin,
+            allreduce=args.fp8_amax_allreduce and is_ddp_initialized(),
+        )
+        ar = ", amax all-reduced" if stack.scales is not None and stack.scales.allreduce else ""
+        print0(f"✓ delayed fp8 scaling: {args.fp8_amax_history}-step amax history, "
+               f"margin {args.fp8_amax_margin}{ar}")
+    return stack
+
+
+class PerfStack:
+    """The per-step half of the recipe: what has to happen, and in what order, around a step.
+
+    Inert when nothing is enabled -- every hook is a `is not None` test on a handle that stays
+    None, so an upstream-shaped run pays one predictable branch per step and nothing else.
+    """
+
+    def __init__(self):
+        self.scales = None       # DelayedScaleState      (--fp8-scaling delayed)
+
+    def after_backward(self):
+        """Between the last .backward() and optimizer.step().
+
+        update() has to see this step's amaxes before the weights move: the readings it folds
+        into the history were taken against the weights the step is about to replace.
+        """
+        if self.scales is not None:
+            self.scales.update()
