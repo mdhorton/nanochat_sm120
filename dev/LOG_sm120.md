@@ -15,4 +15,5 @@ no longer enables it as a side effect. Zero changes to upstream-owned files -- b
 existing `_windowed_impl is None` predicates already express the switch.
 
 See dev/attention-ideas.md for what attention work is ruled out (FlexAttention, document/varlen
-masking) and what is still open (attention sinks, score softcap, the q/k 1.2 scale).
+masking, attention sinks) and what is still open (score softcap, the q/k 1.2 scale, windowed
+inference).
