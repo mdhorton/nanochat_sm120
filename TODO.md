@@ -79,25 +79,29 @@ The real exposure here is the mirror image: `/usr/local/cuda` is a symlink (curr
 Defend that with a `cublaslt_version()` print and a `< 130600` warning, not dependency surgery.
 **Revisit the day this repo moves to a cu130 torch**, when the pin becomes mandatory.
 
-## Delayed scaling for `--nvfp4` (queue B1 in dev/nvfp4-quartet.md)
+## NVFP4 queue, after B1
 
-`DelayedScaleState` now exists, and its state machinery is precision-agnostic: a history ring, a
-margin, and model-wide `[2 fields, 3 roles, L]` buffers registered so the compiled graph reads
-them. Only the last hop differs — fp8 hands a scale to `_scaled_mm`, nvfp4 hands an amax to the
-Quartet kernels, which already take it as a device tensor (`quartet/quant.py:25`,
-`four_six_fp4(o, s, t, x, amax, scale_override)`) and carry a `scale_override` escape hatch.
-`NVFP4Linear` holds a per-layer `scratch_amax` today (`nvfp4.py:242`); what is worth reusing is the
-model-wide flat layout, which makes the per-step update a handful of kernels instead of 3×L.
+`--nvfp4-scaling delayed` landed (queue B1). What it unblocked, from `dev/nvfp4-quartet.md`:
 
-Worth ≤148 ms/step (4.1%) directly — the `vector_norm` amax pre-pass is 204.4 ms over 2,644
-launches under nvfp4 against 56.0 ms over 52 under fp8 — and it unblocks B2 (fuse the quantize into
-its producer, ~68 ms) and B4 (fold the eden scratch round-trip, 35.3 ms + 7,744 launches).
+- **B2 — fuse the quantize into its producer** so `x` is never re-read in bf16. The ~68 ms glue
+  gap against fp8; `four_six_fp4_kernel` is at 85% DRAM, so bytes are the currency. Largest item
+  on that list.
+- **B4 — fold the eden scratch round-trip** (35.3 ms + 7,744 launches + most of A6's `cudaMemset`).
+  The backward writes bf16 scratch block scales that `eden_convert_scales_kernel` reads back and
+  rewrites as e4m3, purely because the per-tensor scale is not known until the pass finishes. A
+  history makes it known in advance -- but unlike B1 this needs an `amax` **input** on kernels
+  that have none, i.e. editing `group_transform_and_eden.cu` / `rht128_eden.cu`, which are
+  vendored Quartet **verbatim @ 5f2a47e**. Different risk class from B1.
+- **A2b — the forward alpha `x_ts * w_ts` is now constant across the grad-accum window** under a
+  history, so its 6.9 ms/step over 5,808 launches collapses to a once-per-step multiply.
+- **A4 — QKV dedup.** `c_q`/`c_k`/`c_v` quantize the same `x`, so they now also carry three
+  identical histories and run three identical readback reductions. A4 collapses all of it.
 
-Caveats: it is numerics-affecting on that arm, so it lands behind the C3/C4 gate and starts its own
-battery — the rule being to start one as soon as the *first* such item lands, since a failed
-battery over four changes does not say which one failed. Only the per-tensor scale is delayed; the
-per-16 e4m3 block scales are computed in-kernel and untouched, so the perturbation is smaller in
-kind than fp8's. That is reasoning, not measurement.
+Not done, and worth a line: `DelayedScaleState` has a `saturated`/`headroom` counter's worth of
+information in `update()`'s `raw >= self.max` mask but does not expose it. Surfacing it would turn
+the one thing that can actually go wrong here -- block-scale saturation -- from an unknown into an
+observable, and a run that never saturates is one where the delayed and dynamic quantizations
+agree by construction.
 
 ## Measurement harness
 

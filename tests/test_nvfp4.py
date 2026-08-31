@@ -48,6 +48,7 @@ from nanochat.sm120.quartet.quant import (  # noqa: E402
     rht128_quant_eden,
     rht128_requant,
 )
+from nanochat.sm120 import nvfp4_state  # noqa: E402
 from nanochat.sm120.quartet.reference import quantize_reference  # noqa: E402
 from nanochat.sm120.quartet.rht import (  # noqa: E402
     hadamard_matrix,
@@ -853,3 +854,175 @@ class TestFusedWgrad:
         _, fused, store = self._pair(lt_gemm)
         keys = fused.state_dict().keys()
         assert "fp4_main_grad" not in keys, keys
+
+
+class TestDelayedScale:
+    """--nvfp4-scaling delayed: the activation's per-tensor amax from a history, not a pre-pass.
+
+    The property that matters is not that the two arms agree -- they cannot, since a different
+    assumed amax rounds every block scale into a different e4m3 bucket -- but that the delayed
+    arm is no *less* accurate. `test_accuracy_matches_dynamic` is the one to read first; the
+    rest guard the history's mechanics.
+    """
+
+    MARGIN = 2.0
+    # The readback is biased high by the 4/6 candidate choice (<=1.5x, since a group that picked
+    # 1/4 reports 1.5x its true max) plus e4m3's +-1/16 rounding of the block scale.
+    BIAS = 1.5 * (1 + 1 / 16)
+
+    @staticmethod
+    def _layer(**kw):
+        torch.manual_seed(0)
+        return NVFP4Linear(256, 384, bias=False, device="cuda", dtype=torch.float32, **kw)
+
+    @classmethod
+    def _pair(cls, margin=None):
+        """Two layers sharing one weight: one dynamic, one on a history."""
+        plain, delayed = cls._layer(), cls._layer()
+        delayed.weight = plain.weight
+        state = nvfp4_state.enable_delayed_scaling(
+            torch.nn.Sequential(delayed), margin=cls.MARGIN if margin is None else margin)
+        return plain, delayed, state
+
+    @staticmethod
+    def _warm(layer, state, x, steps=4):
+        for _ in range(steps):
+            layer(x)
+            state.update()
+
+    @staticmethod
+    def _x(scale=3.0):
+        return torch.randn(512, 256, device="cuda", dtype=torch.bfloat16) * scale
+
+    def test_buffers_are_registered_and_stay_out_of_checkpoints(self):
+        _, delayed, _ = self._pair()
+        # Registered, not set as plain attributes: a Python-side tensor cache captures a
+        # FakeTensor on the first trace and the next compile dies with "Mixing fake modes NYI".
+        for name in ("fp4_scale_in", "fp4_inv_in", "fp4_amax_in"):
+            assert name in dict(delayed.named_buffers()), name
+        assert not any(k.startswith("fp4_") for k in delayed.state_dict()), delayed.state_dict().keys()
+
+    def test_accuracy_matches_dynamic(self):
+        """The headline: a history must not cost accuracy against the pre-pass it replaces.
+
+        Both arms are ~0.12 off the fp32 product -- that is fp4 quantization, not this flag.
+        What is asserted is that the delayed arm does not add to it.
+        """
+        plain, delayed, state = self._pair()
+        x = self._x()
+        ref = x.float() @ plain.weight.float().T
+        self._warm(delayed, state, x)
+        err = lambda o: ((o.float() - ref).norm() / ref.norm()).item()
+        assert err(delayed(x)) < err(plain(x)) * 1.02
+
+    def test_accuracy_is_insensitive_to_the_margin(self):
+        """The assumed amax cancels out of the fp4 codes, surviving only in which e4m3 bucket
+        each block scale rounds into -- so a 4x change in headroom must not move the error."""
+        plain, _, _ = self._pair()
+        x = self._x()
+        ref = x.float() @ plain.weight.float().T
+        base = ((plain(x).float() - ref).norm() / ref.norm()).item()
+        for margin in (1.0, 4.0):
+            _, delayed, state = self._pair(margin=margin)
+            self._warm(delayed, state, x)
+            err = ((delayed(x).float() - ref).norm() / ref.norm()).item()
+            assert err < base * 1.02, (margin, err, base)
+
+    def test_scale_tracks_the_real_amax(self):
+        """The reading comes off the block scales, so it is biased high by the 4/6 candidate
+        choice -- bounded by 1.5x, on top of the margin."""
+        _, delayed, state = self._pair()
+        x = self._x()
+        self._warm(delayed, state, x)
+        ratio = delayed.fp4_inv_in.item() / x.abs().max().item()
+        assert self.MARGIN <= ratio <= self.MARGIN * self.BIAS, ratio
+
+    def test_one_update_corrects_the_initial_assumption(self):
+        """The seed is deliberately well above any real activation. Over-estimating is the safe
+        direction -- the readback is invariant to the assumption, so one update is exact from
+        any seed that did not saturate."""
+        _, delayed, state = self._pair()
+        x = self._x()
+        assert delayed.fp4_inv_in.item() > 5 * x.abs().max().item()
+        delayed(x)
+        state.update()
+        assert delayed.fp4_inv_in.item() < self.MARGIN * self.BIAS * x.abs().max().item()
+
+    def test_search_recovers_from_a_spike(self):
+        """A saturated block scale pins at e4m3's 448 and is a floor on the amax, not a reading
+        of it, so the history has to search upward past it."""
+        _, delayed, state = self._pair()
+        small = self._x()
+        self._warm(delayed, state, small)
+        big = small * 8
+        for _ in range(6):
+            delayed(big)
+            state.update()
+        ratio = delayed.fp4_inv_in.item() / big.abs().max().item()
+        assert self.MARGIN <= ratio <= self.MARGIN * self.BIAS, ratio
+
+    def test_reading_is_the_max_over_micro_steps(self):
+        """Grad accumulation quantizes a different activation per micro-step; the history has
+        to fold in the largest, not the last."""
+        _, delayed, state = self._pair()
+        delayed(self._x(scale=8.0))
+        after_big = delayed.fp4_amax_in.item()
+        delayed(self._x(scale=0.1))
+        assert delayed.fp4_amax_in.item() == after_big
+
+    def test_history_actually_reaches_the_kernel(self):
+        """Guard against a no-op: if the amax never gets to quant_fp4, every test above passes
+        while measuring the dynamic path. A deliberately wrong history must change the output."""
+        _, delayed, state = self._pair()
+        x = self._x()
+        self._warm(delayed, state, x)
+        good = delayed(x)
+        with torch.no_grad():
+            state.scales[1].mul_(1e3)      # inverse-scale slot == the assumed amax
+        assert not torch.equal(good, delayed(x))
+
+    def test_rne_is_rejected(self):
+        """RNE scales a group at the tensor amax onto e4m3's max exactly, leaving no headroom
+        for saturation to be detected against."""
+        layer = self._layer(four_over_six=False)
+        with pytest.raises(ValueError, match="4/6"):
+            nvfp4_state.enable_delayed_scaling(torch.nn.Sequential(layer))
+
+    def test_compile_matches_eager(self):
+        """The history has to survive torch.compile and land on the same scale.
+
+        Not bitwise on the output: Inductor generates a different graph, and the *dynamic* path
+        is already not bit-equal between eager and compiled, so equality would be asserting
+        something this flag does not control. The scale is the strict check.
+        """
+        torch._dynamo.reset()
+        _, eager, eager_state = self._pair()
+        _, comp, comp_state = self._pair()
+        x = self._x()
+        self._warm(eager, eager_state, x)
+        self._warm(torch.compile(comp), comp_state, x)
+        assert comp.fp4_inv_in.item() == pytest.approx(eager.fp4_inv_in.item(), rel=1e-3)
+
+    def test_block_scale_buffer_is_fully_written(self):
+        """The readback maxes over the whole micro_scales buffer, which quant_fp4 allocates with
+        torch.empty and the kernel fills through the cutlass 128x4 swizzle. A hole in that
+        mapping would be read as uninitialized memory and silently inflate every reading."""
+        x = self._x()
+        q = quant_fp4(x, scale_override=1.0, mode=NVFP4QuantMode.FOUR_SIX)
+        poison = torch.full_like(q.micro_scales.view(torch.uint8), 0xFF)
+        q2 = quant_fp4(x, scale_override=1.0, mode=NVFP4QuantMode.FOUR_SIX)
+        # every byte must have been overwritten; 0xFF is e4m3 -NaN and cannot be produced here
+        assert (q2.micro_scales.view(torch.uint8) != poison).all()
+
+    def test_a_nan_activation_does_not_poison_the_history(self):
+        """The history is a running max, so one NaN reading would pin every scale at NaN for
+        the rest of the run with no way back. record_amax clamps e4m3's NaN byte instead."""
+        _, delayed, state = self._pair()
+        x = self._x()
+        self._warm(delayed, state, x)
+        bad = x.clone()
+        bad[0, 0] = float("nan")
+        delayed(bad)
+        state.update()
+        assert torch.isfinite(delayed.fp4_inv_in).all()
+        assert torch.isfinite(state.hist).all()

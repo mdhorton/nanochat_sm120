@@ -38,7 +38,7 @@ import torch.nn.functional as F
 
 from nanochat.common import COMPUTE_DTYPE
 from nanochat.gpt import Linear as _NanochatLinear
-from nanochat.sm120 import fp4_gemm
+from nanochat.sm120 import fp4_gemm, nvfp4_state
 from nanochat.sm120.quartet.quant import (
     NVFP4QuantMode,
     new_seed,
@@ -135,10 +135,15 @@ class _NVFP4Matmul(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, w_fp4, w_ms, w_ts, had, scratch_amax, main_grad, mode,
-                disable_backward_quant):
+                disable_backward_quant, scale_state=None):
         assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
 
-        xq = quant_fp4(x, scale_override=FORWARD_SCALE_OVERRIDE, mode=mode)
+        # --nvfp4-scaling delayed: the activation's amax comes from a history, so the
+        # vector_norm pre-pass never runs and the next reading is taken off the block scales.
+        amax_in, amax_out = (None, None) if scale_state is None else scale_state
+        xq = quant_fp4(x, scale_override=FORWARD_SCALE_OVERRIDE, mode=mode, amax=amax_in)
+        if amax_in is not None:
+            nvfp4_state.record_amax(xq.micro_scales, amax_in, amax_out)
         if w_fp4 is None:
             wq = quant_fp4(weight, scale_override=FORWARD_SCALE_OVERRIDE, mode=mode)
             w_fp4, w_ms, w_ts = wq.fp4, wq.micro_scales, wq.tensor_scale
@@ -167,7 +172,7 @@ class _NVFP4Matmul(torch.autograd.Function):
                 main_grad.add_(grad_weight.float())
                 grad_weight = None
             return (grad_output @ wr, grad_weight,
-                    None, None, None, None, None, None, None, None)
+                    None, None, None, None, None, None, None, None, None)
 
         # A fresh sign pattern per backward: the Hadamard is a fixed rotation, the randomness is
         # what keeps outliers from landing in the same group twice.
@@ -200,7 +205,7 @@ class _NVFP4Matmul(torch.autograd.Function):
             grad_weight = fp4_mm(et_ht.fp4, xt_ht.fp4, et_ht.micro_scales, xt_ht.micro_scales,
                                  alpha)
 
-        return grad_input, grad_weight, None, None, None, None, None, None, None, None
+        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None
 
 
 class NVFP4Linear(_NanochatLinear):
@@ -228,6 +233,11 @@ class NVFP4Linear(_NanochatLinear):
         # The forward weight-quantization cache, filled by refresh_weight_cache(). While these
         # are None the forward quantizes the weight itself, so an unmanaged module still works.
         for name in ("fp4_w", "fp4_ws", "fp4_wg"):
+            self.register_buffer(name, None, persistent=False)
+        # Views into the model-wide DelayedScaleState (--nvfp4-scaling delayed). Registered
+        # here rather than assigned later for the same reason as the cache above: a scale has
+        # to reach the compiled graph as a buffer, not as Python state.
+        for name in ("fp4_scale_in", "fp4_inv_in", "fp4_amax_in"):
             self.register_buffer(name, None, persistent=False)
         # This layer's fp32 gradient accumulator, a view into WgradAccumStore's flat buffer.
         # While it is None the backward returns a gradient the normal way.
@@ -275,10 +285,15 @@ class NVFP4Linear(_NanochatLinear):
         x_2d = x.reshape(-1, orig_shape[-1])
         x_2d, pad = _pad_rows(x_2d.contiguous())
 
+        amax_in = nvfp4_state.assumed_amax(self)
+        # None unless --nvfp4-scaling delayed attached a history. Skipped without grad, so an
+        # eval or sampling pass through this module cannot poison it.
+        scale_state = None if amax_in is None or not torch.is_grad_enabled() else (
+            amax_in, self.fp4_amax_in)
         out = _NVFP4Matmul.apply(x_2d, self.weight.to(torch.bfloat16),
                                  self.fp4_w, self.fp4_ws, self.fp4_wg,
                                  self.had, self.scratch_amax, self.fp4_main_grad,
-                                 self.mode, self.disable_backward_quant)
+                                 self.mode, self.disable_backward_quant, scale_state)
         if pad:
             out = out[: x_2d.shape[0] - pad]
         out = out.reshape(*orig_shape[:-1], out.shape[-1])

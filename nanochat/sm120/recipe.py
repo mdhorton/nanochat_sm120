@@ -11,8 +11,9 @@ update has to see this step's readings before the weights move. Getting it wrong
 the loss still falls, just onto stale scales -- which is why it lives here rather than at a
 hand-placed site.
 
-Only --fp8-scaling is ported so far; see TODO.md for the rest of the stack this file is the
-landing surface for.
+--fp8-scaling and --nvfp4-scaling are ported; see TODO.md for the rest of the stack this file
+is the landing surface for. The NVFP4 history attaches in base_train's nvfp4 block rather than
+here, because apply() runs before the NVFP4Linear conversion exists to attach to.
 """
 import torch.nn as nn
 
@@ -25,12 +26,14 @@ def add_args(parser):
     g.add_argument("--fp8-scaling", type=str, default="dynamic",
                    choices=["dynamic", "delayed", "static-spike"],
                    help="fp8 scale source. 'delayed' scales from an amax history instead of the current tensor, so the cast is not gated by a reduction and each quantized tensor is read once instead of twice: +10.7%% at d12. 'static-spike' replaces the amax with a fixed constant: MEASUREMENT ONLY, the gradients are wrong, it exists to price the ceiling that 'delayed' chases")
-    g.add_argument("--fp8-amax-history", type=int, default=16,
-                   help="--fp8-scaling delayed: how many past steps the scale is the max over. Longer is more robust to a spike, slower to follow a trend")
-    g.add_argument("--fp8-amax-margin", type=float, default=2.0,
-                   help="--fp8-scaling delayed: headroom divisor on the scale, i.e. how far the amax may grow in one step before the cast clips. Nearly free (fp8 is floating point, so this costs range at the bottom, not mantissa bits); 1.0 leaves no room at all")
-    g.add_argument("--fp8-amax-allreduce", action="store_true",
-                   help="--fp8-scaling delayed: all-reduce the amaxes across ranks so every rank picks the same scale. Off by default -- the scale is exactly inverted by _scaled_mm, so per-rank divergence changes only rounding")
+    g.add_argument("--amax-history", type=int, default=16,
+                   help="--fp8-scaling / --nvfp4-scaling delayed: how many past steps the scale is the max over. Longer is more robust to a spike, slower to follow a trend")
+    g.add_argument("--amax-margin", type=float, default=2.0,
+                   help="--fp8-scaling / --nvfp4-scaling delayed: headroom divisor on the scale, i.e. how far the amax may grow in one step before the cast clips. Nearly free in a floating-point format -- it costs range at the bottom, not mantissa bits; 1.0 leaves no room at all")
+    g.add_argument("--amax-allreduce", action="store_true",
+                   help="--fp8-scaling / --nvfp4-scaling delayed: all-reduce the amaxes across ranks so every rank picks the same scale. Off by default -- the scale is exactly inverted (by _scaled_mm for fp8, by the block scales for NVFP4), so per-rank divergence changes only rounding")
+    g.add_argument("--nvfp4-scaling", type=str, default="dynamic", choices=["dynamic", "delayed"],
+                   help="NVFP4 activation scale source. 'delayed' takes the per-tensor amax from a history instead of a vector_norm pre-pass over the activation, and reads the next one back off the e4m3 block scales -- 32x fewer bytes (dev/nvfp4-quartet.md, queue B1). Needs --nvfp4 and 4/6 rounding. Numerics-affecting, so it is not part of the --nvfp4 bundle")
     g.add_argument("--fp8-exclude", type=str, default="",
                    help="comma-separated Linear names to keep in bf16 under --fp8, matched against the last component of the module fqn (e.g. 'lm_head'). Each fp8 Linear costs an amax+cast+transpose pass over its activations; for a layer whose GEMM saving is small relative to that traffic, bf16 can win")
     return g
@@ -94,13 +97,13 @@ def apply(model, args, device_type):
     if args.fp8_scaling == "delayed":
         stack.scales = fp8_state.enable_delayed_scaling(
             model,
-            history_len=args.fp8_amax_history,
-            margin=args.fp8_amax_margin,
-            allreduce=args.fp8_amax_allreduce and is_ddp_initialized(),
+            history_len=args.amax_history,
+            margin=args.amax_margin,
+            allreduce=args.amax_allreduce and is_ddp_initialized(),
         )
         ar = ", amax all-reduced" if stack.scales is not None and stack.scales.allreduce else ""
-        print0(f"✓ delayed fp8 scaling: {args.fp8_amax_history}-step amax history, "
-               f"margin {args.fp8_amax_margin}{ar}")
+        print0(f"✓ delayed fp8 scaling: {args.amax_history}-step amax history, "
+               f"margin {args.amax_margin}{ar}")
     return stack
 
 

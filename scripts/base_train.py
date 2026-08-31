@@ -218,6 +218,8 @@ else:
     orphans = [n for n, v in nvfp4_asked.items() if v is not None]
     if args.nvfp4_rne:
         orphans.append("nvfp4_rne")
+    if args.nvfp4_scaling != "dynamic":
+        raise ValueError(f"--nvfp4-scaling {args.nvfp4_scaling} needs --nvfp4")
     if orphans:
         # Echo the form that was actually typed: "--nvfp4-lt-gemm would do nothing" is a
         # confusing thing to read back when what you passed was --no-nvfp4-lt-gemm.
@@ -231,6 +233,10 @@ else:
 if args.nvfp4:
     if args.fp8:
         raise ValueError("--nvfp4 and --fp8 both replace the Linear layers; pick one")
+    if args.nvfp4_scaling == "delayed" and args.nvfp4_rne:
+        # RNE scales a group at the tensor amax onto e4m3's max exactly, so a saturated block
+        # scale is indistinguishable from a correctly scaled one and the search cannot work.
+        raise ValueError("--nvfp4-scaling delayed needs 4/6 rounding; drop --nvfp4-rne")
     if device_type != "cuda":
         print0("Warning: NVFP4 training requires CUDA, ignoring --nvfp4 flag")
     else:
@@ -266,6 +272,19 @@ if args.nvfp4:
             fp4_gemm.configure(True, epilogue_alpha=args.nvfp4_epilogue_alpha)
             alpha_note = ", per-tensor scale in the epilogue" if args.nvfp4_epilogue_alpha else ""
             print0(f"  fp4 GEMMs routed through cuBLASLt {lt_version} directly{alpha_note}")
+        if args.nvfp4_scaling == "delayed":
+            # Attached here, not in recipe.apply, which runs before the conversion above. The
+            # per-step update is recipe's, via perf.after_backward().
+            from nanochat.sm120 import nvfp4_state
+            perf.scales = nvfp4_state.enable_delayed_scaling(
+                model,
+                history_len=args.amax_history,
+                margin=args.amax_margin,
+                allreduce=args.amax_allreduce and is_ddp_initialized(),
+            )
+            ar = ", amax all-reduced" if perf.scales is not None and perf.scales.allreduce else ""
+            print0(f"  delayed activation scaling: {args.amax_history}-step amax history, "
+                   f"margin {args.amax_margin}{ar}")
         if args.nvfp4_fuse_wgrad:
             # Before torch.compile: this registers the buffers the compiled backward writes into.
             from nanochat.sm120.nvfp4 import enable_wgrad_accum

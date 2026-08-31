@@ -29,3 +29,26 @@ curve cannot serve as the gate:
 steps 0-2 and then drift, reaching 7.4e-5 in the loss by step 19. The donor's determinism table
 calls --fp8 deterministic, but it compared three steps -- too short to see this. Suspect DDP
 reduction order; a 1-GPU control is untried.
+
+2026-08-31 delayed NVFP4 activation scaling (--nvfp4-scaling delayed), queue B1
+quant_fp4's torch.linalg.vector_norm pre-pass over the activation is ~148 ms/step (4.1%) at d12 --
+an upper bound, since Inductor folds it into producers that compute other things. The amax now
+comes from a history instead. Python-only: the kernel already took `const float* amax_ptr` and
+quant_fp4 already had an unused `amax=`. Landed nanochat/sm120/{delayed_scale,nvfp4_state}.py,
+--nvfp4-scaling, and 12 tests. Not measured end to end yet.
+
+The reading comes off the e4m3 block scales, not the tensor: block_scale = e4m3(group_max /
+(amax_assumed * inv_scales_max)), so amax = max(block_scales) * amax_assumed * inv_scales_max --
+1/32 the bytes. Biased high by <=1.5x (4/6 picks per group between inv_val 1/6 and 1/4 and that
+choice does not cancel), which is the safe direction.
+
+Why this is a weaker perturbation than the fp8 equivalent, measured rather than argued: the fp4
+codes are x/(block_scale*scale) and block_scale*scale ~= group_max*inv_val_max, so the assumed
+amax cancels -- it survives only in which e4m3 bucket each block scale rounds into. Error against
+the fp32 product, one layer, warmed history: dynamic 0.12329, delayed 0.12357, and delayed is flat
+to 0.1236 across margin 1.0 -> 4.0. Different rounding, not worse rounding. That is one layer's
+forward, not 100 steps of training dynamics, so it does not replace the bpb battery.
+
+The corridor has two walls and only one is guarded: too low and block scales clip at 448 (the
+search handles it), too high and they flush to e4m3 zero, silently zeroing a whole group of 16.
+The knee is ~256x, so the seed is 100 here rather than fp8's 1e3, which sits at it.
