@@ -56,16 +56,17 @@ of model quality.
 USD cost/hour: 0.50
 best toks/USD: 1.35B
 
-| toks/sec | mem GB |      bpb | notes                    |
-|---------:|-------:|---------:|--------------------------|
-|     112k |   10.2 | 1.676463 | baseline (bf16)          |
-|     120k |   11.4 | 1.676669 | --fp8                    |
-|     164k |   10.2 | 1.685996 | --window-pattern L       |
-|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L |
-|     187k |   11.4 | 1.675918 | --fp8 --attn-impl flex   |
-|     162k |    8.8 | 1.688276 | --nvfp4 --window-pattern L |
-|     164k |   10.7 | 1.692122 | --nvfp4 --nvfp4-lm-head --window-pattern L |
+| toks/sec | mem GB |      bpb | notes                                           |
+|---------:|-------:|---------:|-------------------------------------------------|
+|     112k |   10.2 | 1.676463 | baseline (bf16)                                 |
+|     120k |   11.4 | 1.676669 | --fp8                                           |
+|     164k |   10.2 | 1.685996 | --window-pattern L                              |
+|     185k |   11.4 | 1.686771 | --fp8 --window-pattern L                        |
+|     187k |   11.4 | 1.675918 | --fp8 --attn-impl flex                          |
+|     162k |    8.8 | 1.688276 | --nvfp4 --window-pattern L                      |
+|     164k |   10.7 | 1.692122 | --nvfp4 --nvfp4-lm-head --window-pattern L      |
 |     156k |    9.5 | 1.687710 | --nvfp4 --nvfp4-no-bwd-quant --window-pattern L |
+|     165k |    8.8 | 1.679255 | --nvfp4 --attn-impl flex                        |
 
 FlexAttention gives the sliding-window pattern (SSSL) at the speed of no windowing at all, so the
 speed/quality tradeoff between `--fp8 --window-pattern L` and `--fp8 --attn-impl flex` goes away.
@@ -81,7 +82,6 @@ best toks/USD: 1.11B
 |     211k |   10.8 | 1.677822 | --fp8                    |
 |     278k |    9.6 | 1.682599 | --window-pattern L       |
 |     307k |   10.8 | 1.687786 | --fp8 --window-pattern L |
-
 
 # nvfp4 (Quartet II)
 

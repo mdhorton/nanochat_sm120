@@ -20,3 +20,7 @@ So SSSL is now free: 1.55x faster than the SDPA windowed path, and slightly fast
 while keeping SSSL's better bpb. Per-layer kernel times (B=8 H=10 T=2048 D=128, fwd+bwd, see
 dev/bench_attention.py): SDPA causal 3.82ms, SDPA dense mask 23.62ms, flex causal 5.74ms, flex
 sliding 2.97ms. flex loses on dense causal, so full-context layers stay on SDPA/FA3.
+
+2026-08-30 nvfp4 + flex (merge of nvfp4 into flex-attention), shortrun d12 2x RTX Pro 4000:
+--nvfp4 --attn-impl flex (SSSL)  165k toks/s  8.8GB  bpb 1.679255   (nvfp4 -L was 162k / 8.8GB / 1.6883)
+Same speed as nvfp4 with -L, plus SSSL's bpb gain. fp8 --attn-impl flex (187k / 1.6759) still wins at d12.
