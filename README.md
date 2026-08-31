@@ -1,15 +1,31 @@
 ## NOTE: This is a fork of the nanochat repo: https://github.com/karpathy/nanochat
 
-# nanochat for sm120 GPUs
+## nanochat for sm120 GPUs
 
-Nanochat targets datacenter H100 (sm90) GPUs. This fork targets consumer/workstation Blackwell GPUs (sm120). These sm120
-GPUs will no doubt be slower. However, some questions I was curious about:
+Nanochat primarily targets datacenter GPUs (eg, H100). This makes sense because it takes significant compute to train a
+model to GPT-2 level.
 
-- Are there blackwell specific features that can increase performance?
-- How does H100 performance compare against RTX Pro 6000 Blackwell?
-- How does the rental cost compare? (eg, cheaper cost per hour but more hours are needed)
+Nonetheless, I have 2 RTX Pro 4000 GPUs. This fork is about exploring how well sm120 GPUs peform with nanochat. Here are
+a few questions I was curious about:
+
+- How does sm120 performance, such as RTX Pro 6000 Blackwell WS, compare against H100?
+- How much will using Blackwell specific features (eg, nvfp4) help in closing the gap?
+- How does the rental cost compare bwtewen sm120 and H100?
 
 All benchmarks are Blackwell GPUs, except the H100s.
+
+## What are sm120 GPUs?
+
+These are non-datacenter Blackwell GPUs. They are significantly cheaper in cost from the datacenter variants. For
+example:
+
+- RTX Pro 6000
+- RTX Pro 4000
+- RTX 5090
+
+However, the lack specific features that change their performance profile:
+
+- 
 
 # shortrun.sh
 
@@ -37,12 +53,12 @@ toks/USD: 171M
 USD cost/hour: 3.00
 best toks/USD: 155M
 
-| toks/sec | mem GB | bpb | notes |
-|---------:|-------:|---------:|--------------------------|----------------------------------------------|
-| 71k | 64.8 | 1.576989 | baseline (bf16)          |
-| 79k | 57.2 | 1.566846 | --fp8 |
-| 107k | 64.8 | 1.590402 | --window-pattern L |
-| 129k | 57.2 | 1.581414 | --fp8 --window-pattern L |
+| toks/sec | mem GB |      bpb | notes                    |
+|---------:|-------:|---------:|--------------------------|
+|      71k |   64.8 | 1.576989 | baseline (bf16)          |
+|      79k |   57.2 | 1.566846 | --fp8                    |
+|     107k |   64.8 | 1.590402 | --window-pattern L       |
+|     129k |   57.2 | 1.581414 | --fp8 --window-pattern L |
 
 ## --depth 12 --device-batch-size 8 --num-iterations 50
 
@@ -51,19 +67,19 @@ of model quality.
 
 ### 2x RTX Pro 4000
 
-Most of the tests start here because this is my personal workstion.
+Most tests start here because this is my personal workstion setup.
 
-#### bf16
+#### training precision: bf16
 
 base flag: none
 
-| toks/sec | mem GB | bpb | extra flags |                   |
-|---------:|-------:|----:|-------------|-------------------|
-|          |        |     |             |                   |
-|          |        |     |             |                   |
-|          |        |     |             |                   |
+| toks/sec | mem GB |      bpb | extra flags                   |                   
+|---------:|-------:|---------:|-------------------------------|
+|     112k |   10.2 | 1.676620 |                               |                   
+|     165k |   10.2 | 1.686013 | --window-pattern L            |                   
+|     172k |   10.2 | 1.676444 | NANOCHAT_FA2_WINDOWED_FLASH=1 |                   
 
-#### fp8
+#### training precision: fp8
 
 base flag: --fp8
 
@@ -72,18 +88,18 @@ base flag: --fp8
 |     120k |   11.4 | 1.676669 |                                                     |                   
 |     185k |   11.4 | 1.686771 | --window-pattern L                                  |  
 |     195k |   11.4 | 1.675813 | NANOCHAT_FA2_WINDOWED_FLASH=1                       |                   
-|     205k |    9.7 | 1.662816 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed |                   
+|     204k |    9.7 | 1.662816 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed |                   
 
-#### nvfp4
+#### training precision: nvfp4
 
 base flag: --nvfp4
 
-| toks/sec | mem GB |      bpb | extra flags                   |                                          
-|---------:|-------:|---------:|-------------------------------|
-|     135k |   14.0 | 1.681464 |                               |                                          
-|     220k |   14.0 | 1.691275 | --window-pattern L            |                                          
-|     234k |   14.0 | 1.681451 | NANOCHAT_FA2_WINDOWED_FLASH=1 |  
-|          |        |          |                               |                                          
+| toks/sec | mem GB |      bpb | extra flags                                           |                                          
+|---------:|-------:|---------:|-------------------------------------------------------|
+|     135k |   14.0 | 1.681464 |                                                       |                                          
+|     220k |   14.0 | 1.691275 | --window-pattern L                                    |                                          
+|     233k |   14.0 | 1.681451 | NANOCHAT_FA2_WINDOWED_FLASH=1                         |  
+|     236k |   14.0 | 1.682219 | NANOCHAT_FA2_WINDOWED_FLASH=1 --nvfp4-scaling delayed |                                          
 
 ### 4x RTX Pro 4000
 
