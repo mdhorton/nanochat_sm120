@@ -33,12 +33,12 @@ FLAGS=(
 case "$SM_ARCH" in
     9.0|10.0) FLAGS+=(--fp8) ;;
     12.0) FLAGS+=(--fp8 ) ;;&
-    12.0) FLAGS+=(--fp8-scaling delayed) ;;&
-    12.0) FLAGS+=(--wgrad-nt) ;;&
+#    12.0) FLAGS+=(--fp8-scaling delayed) ;;&
+#    12.0) FLAGS+=(--wgrad-nt) ;;&
 #    12.0) FLAGS+=(--nvfp4) ;;&
 #    12.0) FLAGS+=(--nvfp4-scaling delayed) ;;&
 #    12.0) FLAGS+=(--window-pattern L ) ;;&
-    12.0) export NANOCHAT_FA2_SWINDOW=1 ;;&
+#    12.0) export NANOCHAT_FA2_SWINDOW=1 ;;&
     *) ;;
 esac
 
