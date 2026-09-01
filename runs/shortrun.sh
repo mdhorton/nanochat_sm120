@@ -3,6 +3,9 @@
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export NANOCHAT_BASE_DIR=${NANOCHAT_BASE_DIR:-/remote/.nanochat-cache}
 
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,P2P
+
 NPROC=$(nvidia-smi -L 2>/dev/null | wc -l)
 SM_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d " ")
 VRAM_GB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{printf "%.0f", $1/1024}')
