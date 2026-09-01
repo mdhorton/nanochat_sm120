@@ -1,10 +1,11 @@
 """One place that owns the sm120 flags, the enablement order and the per-step hooks.
 
-scripts/base_train.py keeps three calls instead of the flag plumbing:
+scripts/base_train.py keeps four calls instead of the flag plumbing:
 
     recipe.add_args(parser)                        # before parse_args
     perf = recipe.apply(model, args, device_type)  # before torch.compile
     perf.after_backward()                          # between the last backward and the step
+    perf.report_once()                             # after that, once -- what got pinned
 
 The ordering inside a step is load-bearing and documented on the method that owns it: the amax
 update has to see this step's readings before the weights move. Getting it wrong is silent --
@@ -34,6 +35,8 @@ def add_args(parser):
                    help="--fp8-scaling / --nvfp4-scaling delayed: all-reduce the amaxes across ranks so every rank picks the same scale. Off by default -- the scale is exactly inverted (by _scaled_mm for fp8, by the block scales for NVFP4), so per-rank divergence changes only rounding")
     g.add_argument("--nvfp4-scaling", type=str, default="dynamic", choices=["dynamic", "delayed"],
                    help="NVFP4 activation scale source. 'delayed' takes the per-tensor amax from a history instead of a vector_norm pre-pass over the activation, and reads the next one back off the e4m3 block scales -- 32x fewer bytes (dev/nvfp4-quartet.md, queue B1). Needs --nvfp4 and 4/6 rounding. Numerics-affecting, so it is not part of the --nvfp4 bundle")
+    g.add_argument("--wgrad-nt", action="store_true",
+                   help="run the weight-grad GEMMs in the natural (NT) operand layout, which sm120's cuBLASLt accepts, instead of building the transposed copies the TN form needs -- deletes the pure-copy fp8 transpose kernels, 4.6%% of a step: +8.4%% at d12. Needs --fp8, and JIT-builds csrc/pinned_gemm.cu on first use. Costs ~1.7 GB of peak memory")
     g.add_argument("--fp8-exclude", type=str, default="",
                    help="comma-separated Linear names to keep in bf16 under --fp8, matched against the last component of the module fqn (e.g. 'lm_head'). Each fp8 Linear costs an amax+cast+transpose pass over its activations; for a layer whose GEMM saving is small relative to that traffic, bf16 can win")
     return g
@@ -66,13 +69,15 @@ def apply(model, args, device_type):
     """
     import nanochat.sm120 as sm120
     from nanochat.fp8 import Float8LinearConfig, convert_to_float8_training
-    from nanochat.sm120 import fp8_state
+    from nanochat.sm120 import fp8_pinned, fp8_state
 
     stack = PerfStack()
 
     if not args.fp8:
         if args.fp8_scaling != "dynamic":
             print0(f"Warning: --fp8-scaling {args.fp8_scaling} needs --fp8, ignoring")
+        if args.wgrad_nt:
+            print0("Warning: --wgrad-nt needs --fp8, ignoring")
         return stack
     if device_type != "cuda":
         print0("Warning: FP8 training requires CUDA, ignoring --fp8 flag")
@@ -104,6 +109,9 @@ def apply(model, args, device_type):
         ar = ", amax all-reduced" if stack.scales is not None and stack.scales.allreduce else ""
         print0(f"✓ delayed fp8 scaling: {args.amax_history}-step amax history, "
                f"margin {args.amax_margin}{ar}")
+    if args.wgrad_nt:
+        fp8_pinned.configure_wgrad_nt(True)
+        print0("✓ natural-layout (NT) wgrad: transpose copies removed from the backward")
     return stack
 
 
@@ -116,6 +124,7 @@ class PerfStack:
 
     def __init__(self):
         self.scales = None       # DelayedScaleState      (--fp8-scaling delayed)
+        self._reported = False
 
     def after_backward(self):
         """Between the last .backward() and optimizer.step().
@@ -125,3 +134,23 @@ class PerfStack:
         """
         if self.scales is not None:
             self.scales.update()
+
+    def report_once(self):
+        """NT wgrad plans autotune lazily on first use, so report them after the first backward."""
+        from nanochat.sm120 import fp8_pinned
+
+        # The enabled state, not the flag: --wgrad-nt without --fp8 has already been warned
+        # about and ignored, and warning again here would call a run no-one claimed was an NT
+        # measurement a failed one.
+        if self._reported or not fp8_pinned.wgrad_nt():
+            return
+        lines = fp8_pinned.log_lines()
+        for line in lines:
+            print0(line)
+        if not lines:
+            # The flag was passed and the first backward is done, so plans should exist. An arm
+            # that pinned nothing reads ~2.5% low while still printing its enablement line
+            # above, so say so rather than leave the ✓ standing alone.
+            print0("WARNING: --wgrad-nt built no plans -- this run is NOT using the NT wgrad, "
+                   "and its throughput is not an NT measurement")
+        self._reported = True

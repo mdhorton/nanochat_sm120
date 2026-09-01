@@ -2,44 +2,66 @@
 
 ## The rest of the sm120 fp8 stack
 
-`--fp8-scaling` is ported (`nanochat/sm120/{recipe,fp8_state,fp8_backend}.py`). Five more flags
-exist in the sibling fork `/remote/projects/pycharm/sm120_nanochat`, branch **`refactor`** — read
-them with `git -C /remote/projects/pycharm/sm120_nanochat show refactor:<path>`. Its
+`--fp8-scaling` and `--wgrad-nt` are ported
+(`nanochat/sm120/{recipe,fp8_state,fp8_backend,fp8_pinned}.py`, `csrc/pinned_gemm.cu`). Four more
+flags exist in the sibling fork `/remote/projects/pycharm/sm120_nanochat`, branch **`refactor`** —
+read them with `git -C /remote/projects/pycharm/sm120_nanochat show refactor:<path>`. Its
 `dev/perf-log.md` and `dev/perf-log-experiments.md` carry the measurements below.
 
 | flag | d12 | d16 | needs | notes |
 |---|---|---|---|---|
-| `--wgrad-nt` | +8.4% | +8.5% | CUDA ext | largest remaining; costs **+1,680 MiB** |
-| `--pin-gemm all` | +6.0% | +0.8% | CUDA ext | −512 MiB; collapses with depth |
+| `--pin-gemm all` | +6.0% | +0.8% | — | ext now in-tree; −512 MiB; collapses with depth |
 | `--fp8-weight-cache` | +1.0% | +1.5% | — | Python-only; +218–448 MiB |
-| `--fuse-wgrad-accum` | +0.7–1.9% | +1.4% | CUDA ext | TE's `fuse_wgrad_accumulation` |
+| `--fuse-wgrad-accum` | +0.7–1.9% | +1.4% | — | ext now in-tree; TE's `fuse_wgrad_accumulation` |
 | `--muon-autotune` | +0.7% | +0.7% | — | precision-independent; `--nvfp4` can take it too |
 
 Marginals do not add — the donor's six compound to +22.7% against +18.1% measured at d16. The
 full stack measured **240,038 tok/s** at d12/dbs 8/2 GPU against 180,890 with none of it.
 
 `fp8_state.py` was cut in half on the way in: `WeightCastCache`, `WgradAccumStore` and their
-factories are the two Python-only rows above. `fp8_backend.py` inherits `mm_fwd`/`mm_dgrad`/
-`wgrad` unchanged; the donor overrides all three.
+factories are the two rows above that need no new kernel. `fp8_backend.py` overrides `wgrad` and
+inherits `mm_fwd`/`mm_dgrad`; the donor overrides all three, routing the other two through
+`fp8_pinned.mm` for `--pin-gemm`.
 
-### The CUDA-extension prerequisite, and its trap
+### The CUDA extension, now in-tree
 
-`dev/custom_gemm/pinned_gemm.cu` → `nanochat/sm120/csrc/pinned_gemm.cu`. Its build helper must
-**not** reuse `quartet.ext.resolve_cuda_home()`, which is major-matching and resolves torch's
-cu12.8. Half of what `--pin-gemm`/`--wgrad-nt` are worth is that the extension links the *system*
+`nanochat/sm120/csrc/pinned_gemm.cu` is the donor's `dev/custom_gemm/pinned_gemm.cu` verbatim, so
+it still carries the `accum` and `fast_accum` plan kinds `--fuse-wgrad-accum` and `--pin-gemm`
+need — both are Python-only additions to `fp8_pinned.py` from here.
+
+Its build helper (`fp8_pinned._ext`) deliberately does **not** reuse
+`quartet.ext.resolve_cuda_home()`, which is major-matching and resolves torch's cu12.8. Half of
+what `--pin-gemm`/`--wgrad-nt` are worth is that the extension links the *system*
 `libcublasLt.so.13.6.0.2`: under 12.8 every fp8 GEMM lands on `sm89_xmma_*` (Ada kernels on a
-Blackwell card) instead of `nvjet_sm120_*`. Confirmed here — a `--nvfp4` run logs
-`fp4 GEMMs routed through cuBLASLt 120804`, i.e. this repo's launcher runs 12.8.4, which is the
-right choice for *that* extension (one library shared with `_scaled_mm`) and the wrong one for the
-pinned fp8 GEMMs. Acceptance criterion:
-`objdump -p <build_dir>/pinned_gemm.so | grep NEEDED` shows `libcublasLt.so.13`. Also save and
-restore `CUDA_HOME` around the build (the quartet extension mutates it globally) and key the build
-directory on the toolkit, not just on torch's CUDA version.
+Blackwell card) instead of `nvjet_sm120_*`. It builds against `/usr/local/cuda` (13.3) instead,
+keys its build directory on the toolkit rather than on `torch.version.cuda`, and saves/restores
+`CUDA_HOME` around the build because quartet and `fp4_gemm` both mutate it globally.
 
-Guard against a pinning arm that pinned nothing: a build failure falls back to `_scaled_mm` while
-still printing `✓`, and reads ~2.5% low. Port the donor's three guards (`ExtensionUnavailable`
-raise, per-shape stderr warning, and a `report_once` that says so when pinning is on but no plans
-were built).
+Two things the earlier note got wrong, both settled by building it:
+
+- **A cu13 toolkit against a cu12 torch is fine.** `cpp_extension`'s major-mismatch `RuntimeError`
+  is raised from `_check_cuda_version`, which only the *setup.py* path calls — JIT `load()` never
+  does. The resulting `.so` needs `libcublasLt.so.13` and `libcudart.so.13` alongside torch's
+  cu12 libs and the two runtimes coexist.
+- **No RPATH is strictly needed**, since `ldconfig` already resolves `libcublasLt.so.13` through
+  `/usr/local/cuda/targets/x86_64-linux/lib` — but one is set anyway, because that path is a
+  symlink an OS update can repoint.
+
+Acceptance criterion, and it is a test (`tests/test_fp8_wgrad_nt.py`):
+`objdump -p <build_dir>/pinned_gemm.so | grep NEEDED` shows `libcublasLt.so.13`.
+
+All three guards are in: `ExtensionUnavailable` raises rather than falling back (a build failure
+that fell back would read ~2.5% low while still printing `✓`), `_warn` puts a per-shape rejection
+on stderr, and `PerfStack.report_once` drains the plan log after the first backward and says so
+when the NT wgrad is on but no plans were built. `report_once` gates on
+`fp8_pinned.wgrad_nt()`, not on the flag, so `--wgrad-nt` without `--fp8` warns once and stays
+quiet.
+
+Measured here, d12/dbs 8/2 GPU, `--fp8 --fp8-scaling delayed` + `NANOCHAT_FA2_WINDOWED_FLASH=1`,
+one `arm_batch.sh` batch: **205,028 → 228,734 tok/s (+11.6%)**, peak 9,654 → 10,640 MiB
+(+986 MiB, against the donor's +1,680 at d16), bpb 1.665911 → 1.663725. The NT arm started 10 °C
+hotter than the baseline, so the gain is if anything understated. The four plan lines all report
+`err 0` against the TN reference, at 4.3–6.4× on the wgrad including the transpose copies.
 
 ### The design decision, deferred
 

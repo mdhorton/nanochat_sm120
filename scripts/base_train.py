@@ -640,6 +640,7 @@ while True:
     # step the optimizer
     if profiling: torch.cuda.nvtx.range_push("optim")
     perf.after_backward()
+    perf.report_once()
     if nvfp4_main_grads is not None:
         # After the last backward, before anything reads .grad: the fused wgrad wrote into
         # these buffers instead, and this is what hands them to the optimizer.

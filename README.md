@@ -1,31 +1,34 @@
 ## NOTE: This is a fork of the nanochat repo: https://github.com/karpathy/nanochat
 
-## nanochat for sm120 GPUs
+## Nanochat for sm120 GPUs
 
 Nanochat primarily targets datacenter GPUs (eg, H100). This makes sense because it takes significant compute to train a
 model to GPT-2 level.
 
-Nonetheless, I have 2 RTX Pro 4000 GPUs. This fork is about exploring how well sm120 GPUs peform with nanochat. Here are
-a few questions I was curious about:
+Nonetheless, I have 2 RTX Pro 4000 GPUs (sm120). This fork is about exploring how well sm120 GPUs peform with nanochat.
+Here are a few questions I was curious about:
 
-- How does sm120 performance, such as RTX Pro 6000 Blackwell WS, compare against H100?
-- How much will using Blackwell specific features (eg, nvfp4) help in closing the gap?
+- How does sm120 performance compare against H100?
+- What performance improvement will Blackwell specific features (eg, nvfp4) help in closing the gap?
 - How does the rental cost compare bwtewen sm120 and H100?
 
-All benchmarks are Blackwell GPUs, except the H100s.
+All benchmarks are with Blackwell GPUs (sm120), except the H100s where noted.
 
 ## What are sm120 GPUs?
 
-These are non-datacenter Blackwell GPUs. They are significantly cheaper in cost from the datacenter variants. For
-example:
+These are non-datacenter Blackwell GPUs. They are significantly cheaper in purchasing cost vs datacenter Blackwell.
 
 - RTX Pro 6000
 - RTX Pro 4000
 - RTX 5090
 
-However, the lack specific features that change their performance profile:
+However, they lack specific features that change their performance profile:
 
-- 
+- no tcgen05
+- no tensor core memory
+- no NVLink
+
+Another feature missing from the non-Pro lineup (eg, RTX 5090) is P2P. Whereas the RTX Pro lineup has P2P.
 
 # shortrun.sh
 
@@ -71,7 +74,7 @@ Most tests start here because this is my personal workstion setup.
 
 #### training precision: bf16
 
-base flag: none
+base flag: none (default with no flag)
 
 | toks/sec | mem GB |      bpb | extra flags                   |                   
 |---------:|-------:|---------:|-------------------------------|
@@ -83,18 +86,19 @@ base flag: none
 
 base flag: --fp8
 
-| toks/sec | mem GB |      bpb | extra flags                                         |                   
-|---------:|-------:|---------:|-----------------------------------------------------|
-|     120k |   11.4 | 1.676669 |                                                     |                   
-|     185k |   11.4 | 1.686771 | --window-pattern L                                  |  
-|     195k |   11.4 | 1.675813 | NANOCHAT_FA2_WINDOWED_FLASH=1                       |                   
-|     204k |    9.7 | 1.662816 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed |                   
+| toks/sec | mem GB |      bpb | extra flags                                                    |                   
+|---------:|-------:|---------:|----------------------------------------------------------------|
+|     120k |   11.4 | 1.676669 |                                                                |                   
+|     185k |   11.4 | 1.686771 | --window-pattern L                                             |  
+|     195k |   11.4 | 1.675813 | NANOCHAT_FA2_WINDOWED_FLASH=1                                  |                   
+|     204k |    9.7 | 1.662816 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed            |                   
+|     229k |   10.6 | 1.662855 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed --wgrad-nt |                   
 
 #### training precision: nvfp4
 
 base flag: --nvfp4
 
-| toks/sec | mem GB |      bpb | extra flags                                           |                                          
+| toks/sec | mem GB |      bpb | extra flags                                           |
 |---------:|-------:|---------:|-------------------------------------------------------|
 |     135k |   14.0 | 1.681464 |                                                       |                                          
 |     220k |   14.0 | 1.691275 | --window-pattern L                                    |                                          

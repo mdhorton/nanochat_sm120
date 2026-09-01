@@ -1,17 +1,20 @@
 """The sm120 FP8 backend: what nanochat/fp8.py calls instead of its stock primitives.
 
-Implements nanochat.fp8.Float8Backend, adding one thing to the upstream path:
+Implements nanochat.fp8.Float8Backend, adding two things to the upstream path:
 
   delayed / spiked scaling  quantize() reads this role's scale from DelayedScaleState instead
                             of reducing the tensor first  (--fp8-scaling, +10.7% at d12)
+  natural-layout wgrad      wgrad() reads both operands as they sit, so the go_T / in_col
+                            transpose copies never enter the graph  (--wgrad-nt, +8.4% at d12)
 
-The three GEMMs are inherited unchanged, so with no state attached this backend runs upstream's
-own path. sm120_nanochat@refactor also substitutes tuned cuBLASLt algorithms, cached weight
-casts and a natural-layout wgrad at these same seams -- see TODO.md.
+fwd and dgrad are inherited unchanged, and so is the TN wgrad, so with nothing enabled this
+backend runs upstream's own path. sm120_nanochat@refactor also substitutes tuned cuBLASLt
+algorithms and cached weight casts at these same seams -- see TODO.md.
 """
 import torch
 
 from nanochat.fp8 import Float8Backend
+from nanochat.sm120 import fp8_pinned
 from nanochat.sm120.fp8_state import _ROLE_NAMES, to_fp8
 
 # quantize() is called with a role name; these pick that role's slice of the layer's state.
@@ -61,3 +64,12 @@ class SM120Backend(Float8Backend):
     def weight_operands(self, weight, state):
         w_fp8, w_inv = to_fp8(weight, torch.float8_e4m3fn, self._scale(state, "w"))
         return w_fp8, w_inv, None
+
+    def wgrad(self, go_fp8, in_fp8, go_inv, in_inv, out_dtype, state):
+        # Natural-layout (NT) wgrad: sm120's cuBLASLt reads both operands as they sit, so the
+        # go_T / in_col transpose copies super() builds never materialize -- they were 4.6% of
+        # a training step as pure-copy kernels. The predicate is read at trace time, so with
+        # the flag off the compiled graph is upstream's, branch and all.
+        if fp8_pinned.wgrad_nt():
+            return fp8_pinned.mm_wgrad_nt(go_fp8, in_fp8, go_inv, in_inv, out_dtype)
+        return super().wgrad(go_fp8, in_fp8, go_inv, in_inv, out_dtype, state)
