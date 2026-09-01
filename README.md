@@ -5,7 +5,7 @@
 This fork explores sm120 GPU peformance with nanochat. Here are a few questions I was curious about:
 
 - How does sm120 training and inference performance compare with H100 (sm90)?
-- Will Blackwell specific features (eg, nvfp4) help close the gap?
+- Can Blackwell specific features (eg, nvfp4) help close the gap?
 - How does rental cost compare bwtewen sm120 and sm90?
 
 # TLDR; Conclusion
@@ -14,7 +14,7 @@ TBD
 
 ## Baseline
 
-Nanochat initially outputs the following when run against an sm120 GPU:
+Nanochat initially outputs the following when run on a sm120 GPU:
 
 ```
 WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback
@@ -23,7 +23,7 @@ WARNING: SDPA has no support for sliding window attention (window_pattern='SSSL'
 WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.
 ```
 
-This is very useful and the first place to look for performance improvements. Using `--window-pattern L` helps quite a
+This is very useful and tells you where to look for performance improvements. Using `--window-pattern L` helps quite a
 bit but it's more of a temporary workaround.
 
 Runs using `--window-pattern L` represent the nanochat upstream baseline for sm120.
