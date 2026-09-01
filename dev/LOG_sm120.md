@@ -52,3 +52,27 @@ forward, not 100 steps of training dynamics, so it does not replace the bpb batt
 The corridor has two walls and only one is guarded: too low and block scales clip at 448 (the
 search handles it), too high and they flush to e4m3 zero, silently zeroing a whole group of 16.
 The knee is ~256x, so the seed is 100 here rather than fp8's 1e3, which sits at it.
+
+2026-09-01 pinned cuBLASLt algorithms (--pin-gemm), ported from sm120_nanochat@refactor
+Its experiment 7 measures cuBLAS mispicking the fp8 wgrad shapes by 15-42% and fwd/dgrad by
+5-25%, and +6.0% at d12 for `all`. Landed: the --pin-gemm surface in
+nanochat/sm120/fp8_pinned.py (_MODE/_pins/mm/_build_plan/pinned_mm), mm_fwd + mm_dgrad on
+SM120Backend with the TN wgrad inlined from super() so the pin reaches it, the flag in
+recipe.py, and 13 tests. The extension (csrc/pinned_gemm.cu) was already in-tree for --wgrad-nt.
+
+Measured here, d12/dbs 8/2 GPU, --fp8 + NANOCHAT_FA2_SWINDOW=1, steps 3-7 of an 8-step run:
+196,254 -> 199,668 tok/s (+1.7%), peak 11,409 -> 10,929 MiB (-480 MiB, against the donor's
+-512). Eleven plans, all verified against _scaled_mm at err <= 0.0019. Without the flash window
+(SDPA mask, so the GEMMs are a smaller share of the step) the same pair reads +0.75%.
+
+Well short of the donor's +6.0%, and the plan log says why: vs_algo is 1.00x on eight of the
+eleven shapes -- the autotuner mostly re-picks cuBLASLt's *own* first candidate. So the
+algorithm choice is already right here, and what is left is vs_ref, 1.01-1.60x, which is the
+gap between that candidate and _scaled_mm. PyTorch queries the heuristic with its own smaller
+workspace, so it is not offered the same algorithm. The donor measured against cuBLASLt 12.8;
+this links the system 13.6 (see fp8_pinned._cuda_home), which has evidently closed most of the
+mispick. The remaining win is the workspace, not the search.
+
+lm_head fwd is the one GEMM the mode gate declines: its 16384x32768 bf16 output is 1.07 GB and
+verification holds it twice. That is _MAX_OUTPUT_BYTES doing its job, and it is why the pinned
+arm uses *less* peak memory, not more.

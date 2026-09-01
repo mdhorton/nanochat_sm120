@@ -173,6 +173,15 @@ paths that take no flags. This is an acceptable trade off given that the purpose
 
 ## Rejected
 
+### FP8 pin-gemm
+
+cuBLAS picks one FP8 GEMM algorithm per shape from a heuristic, and _scaled_mm won't let you override it. Pin-gemm
+autotunes the choice per shape instead, then verifies before trusting it.
+
+branch: pin-gemm
+
+result: A 2.5% improvement but only at low depth. This is because at higher depth cublas picks a better kernel. 
+
 ### FlexAttention
 
 This was the first attempt to fix the sliding-window problem.

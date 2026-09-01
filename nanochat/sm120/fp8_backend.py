@@ -1,19 +1,22 @@
 """The sm120 FP8 backend: what nanochat/fp8.py calls instead of its stock primitives.
 
-Implements nanochat.fp8.Float8Backend, adding two things to the upstream path:
+Implements nanochat.fp8.Float8Backend, adding three things to the upstream path:
 
   delayed / spiked scaling  quantize() reads this role's scale from DelayedScaleState instead
                             of reducing the tensor first  (--fp8-scaling, +10.7% at d12)
+  tuned cuBLASLt GEMMs      all three matmuls go through fp8_pinned, which can substitute a
+                            measured algorithm for the heuristic's  (--pin-gemm, +6.0% at d12)
   natural-layout wgrad      wgrad() reads both operands as they sit, so the go_T / in_col
                             transpose copies never enter the graph  (--wgrad-nt, +8.4% at d12)
 
-fwd and dgrad are inherited unchanged, and so is the TN wgrad, so with nothing enabled this
-backend runs upstream's own path. sm120_nanochat@refactor also substitutes tuned cuBLASLt
-algorithms and cached weight casts at these same seams -- see TODO.md.
+Each piece degrades independently, and with nothing enabled this backend runs upstream's own
+path: with no state the quantizer is upstream's, and with fp8_pinned off every mm falls back to
+torch._scaled_mm on the same operands. sm120_nanochat@refactor also caches weight casts and
+folds grad accumulation into the wgrad epilogue at these same seams -- see TODO.md.
 """
 import torch
 
-from nanochat.fp8 import Float8Backend
+from nanochat.fp8 import Float8Backend, _to_col_major
 from nanochat.sm120 import fp8_pinned
 from nanochat.sm120.fp8_state import _ROLE_NAMES, to_fp8
 
@@ -65,11 +68,26 @@ class SM120Backend(Float8Backend):
         w_fp8, w_inv = to_fp8(weight, torch.float8_e4m3fn, self._scale(state, "w"))
         return w_fp8, w_inv, None
 
+    def mm_fwd(self, in_fp8, w_t, in_inv, w_inv, out_dtype, state=None):
+        # Routed through fp8_pinned so --pin-gemm can substitute a chosen cuBLASLt algorithm for
+        # the heuristic's pick; falls back to the identical _scaled_mm call when off. This role
+        # fast-accumulates (fp8_pinned._FAST_ACCUM), matching upstream: less accurate,
+        # measurably faster, standard for the forward.
+        return fp8_pinned.mm(in_fp8, w_t, in_inv, w_inv, out_dtype, "fwd")
+
+    def mm_dgrad(self, go_fp8, w_col, go_inv, w_inv, out_dtype):
+        return fp8_pinned.mm(go_fp8, w_col, go_inv, w_inv, out_dtype, "dgrad")
+
     def wgrad(self, go_fp8, in_fp8, go_inv, in_inv, out_dtype, state):
         # Natural-layout (NT) wgrad: sm120's cuBLASLt reads both operands as they sit, so the
-        # go_T / in_col transpose copies super() builds never materialize -- they were 4.6% of
-        # a training step as pure-copy kernels. The predicate is read at trace time, so with
-        # the flag off the compiled graph is upstream's, branch and all.
+        # go_T / in_col transpose copies below never materialize -- they were 4.6% of a training
+        # step as pure-copy kernels. The predicate is read at trace time, so with the flag off
+        # the compiled graph is upstream's, branch and all.
         if fp8_pinned.wgrad_nt():
             return fp8_pinned.mm_wgrad_nt(go_fp8, in_fp8, go_inv, in_inv, out_dtype)
-        return super().wgrad(go_fp8, in_fp8, go_inv, in_inv, out_dtype, state)
+        # The TN form, inlined from super() rather than delegated to it, so --pin-gemm reaches
+        # this GEMM too. go_fp8 is [B, N] contiguous and the first operand must be row-major, so
+        # the .contiguous() on the transpose is a physical rearrangement, not a view.
+        go_T = go_fp8.t().contiguous()   # [N, B] row-major
+        in_col = _to_col_major(in_fp8)   # [B, K] column-major
+        return fp8_pinned.mm(go_T, in_col, go_inv, in_inv, out_dtype, "wgrad")

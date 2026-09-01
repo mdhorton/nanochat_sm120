@@ -12,9 +12,10 @@ update has to see this step's readings before the weights move. Getting it wrong
 the loss still falls, just onto stale scales -- which is why it lives here rather than at a
 hand-placed site.
 
---fp8-scaling and --nvfp4-scaling are ported; see TODO.md for the rest of the stack this file
-is the landing surface for. The NVFP4 history attaches in base_train's nvfp4 block rather than
-here, because apply() runs before the NVFP4Linear conversion exists to attach to.
+--fp8-scaling, --nvfp4-scaling, --pin-gemm and --wgrad-nt are ported; see TODO.md for the rest
+of the stack this file is the landing surface for. The NVFP4 history attaches in base_train's
+nvfp4 block rather than here, because apply() runs before the NVFP4Linear conversion exists to
+attach to.
 """
 import torch.nn as nn
 
@@ -35,6 +36,9 @@ def add_args(parser):
                    help="--fp8-scaling / --nvfp4-scaling delayed: all-reduce the amaxes across ranks so every rank picks the same scale. Off by default -- the scale is exactly inverted (by _scaled_mm for fp8, by the block scales for NVFP4), so per-rank divergence changes only rounding")
     g.add_argument("--nvfp4-scaling", type=str, default="dynamic", choices=["dynamic", "delayed"],
                    help="NVFP4 activation scale source. 'delayed' takes the per-tensor amax from a history instead of a vector_norm pre-pass over the activation, and reads the next one back off the e4m3 block scales -- 32x fewer bytes (dev/nvfp4-quartet.md, queue B1). Needs --nvfp4 and 4/6 rounding. Numerics-affecting, so it is not part of the --nvfp4 bundle")
+    g.add_argument("--pin-gemm", type=str, default="off",
+                   choices=["off", "attn", "wgrad", "all"],
+                   help="substitute an autotuned cuBLASLt algorithm for the heuristic's pick on the fp8 GEMMs -- cuBLAS mispicks the wgrad shapes by 15-42%% and fwd/dgrad by 5-25%%, and _scaled_mm cannot ask for another. 'attn' pins only the square attention wgrad, 'wgrad' every wgrad shape, 'all' adds fwd and dgrad: +6.0%% at d12, +0.8%% at d16, the win collapsing with depth. Needs --fp8, and JIT-builds csrc/pinned_gemm.cu on first use")
     g.add_argument("--wgrad-nt", action="store_true",
                    help="run the weight-grad GEMMs in the natural (NT) operand layout, which sm120's cuBLASLt accepts, instead of building the transposed copies the TN form needs -- deletes the pure-copy fp8 transpose kernels, 4.6%% of a step: +8.4%% at d12. Needs --fp8, and JIT-builds csrc/pinned_gemm.cu on first use. Costs ~1.7 GB of peak memory")
     g.add_argument("--fp8-exclude", type=str, default="",
@@ -78,6 +82,8 @@ def apply(model, args, device_type):
             print0(f"Warning: --fp8-scaling {args.fp8_scaling} needs --fp8, ignoring")
         if args.wgrad_nt:
             print0("Warning: --wgrad-nt needs --fp8, ignoring")
+        if args.pin_gemm != "off":
+            print0(f"Warning: --pin-gemm {args.pin_gemm} needs --fp8, ignoring")
         return stack
     if device_type != "cuda":
         print0("Warning: FP8 training requires CUDA, ignoring --fp8 flag")
@@ -109,6 +115,10 @@ def apply(model, args, device_type):
         ar = ", amax all-reduced" if stack.scales is not None and stack.scales.allreduce else ""
         print0(f"✓ delayed fp8 scaling: {args.amax_history}-step amax history, "
                f"margin {args.amax_margin}{ar}")
+    if args.pin_gemm != "off":
+        fp8_pinned.configure(args.pin_gemm)
+        print0(f"✓ pinned cuBLASLt algorithms: --pin-gemm {args.pin_gemm}, autotuned per shape "
+               "on first use")
     if args.wgrad_nt:
         fp8_pinned.configure_wgrad_nt(True)
         print0("✓ natural-layout (NT) wgrad: transpose copies removed from the backward")
@@ -136,13 +146,13 @@ class PerfStack:
             self.scales.update()
 
     def report_once(self):
-        """NT wgrad plans autotune lazily on first use, so report them after the first backward."""
+        """Plans autotune lazily on first use, so report them after the first backward."""
         from nanochat.sm120 import fp8_pinned
 
-        # The enabled state, not the flag: --wgrad-nt without --fp8 has already been warned
-        # about and ignored, and warning again here would call a run no-one claimed was an NT
-        # measurement a failed one.
-        if self._reported or not fp8_pinned.wgrad_nt():
+        # The enabled state, not the flag: --pin-gemm/--wgrad-nt without --fp8 have already been
+        # warned about and ignored, and warning again here would call a run no-one claimed was a
+        # pinned measurement a failed one.
+        if self._reported or not fp8_pinned.enabled():
             return
         lines = fp8_pinned.log_lines()
         for line in lines:
@@ -151,6 +161,6 @@ class PerfStack:
             # The flag was passed and the first backward is done, so plans should exist. An arm
             # that pinned nothing reads ~2.5% low while still printing its enablement line
             # above, so say so rather than leave the ✓ standing alone.
-            print0("WARNING: --wgrad-nt built no plans -- this run is NOT using the NT wgrad, "
-                   "and its throughput is not an NT measurement")
+            print0("WARNING: --pin-gemm/--wgrad-nt built no plans -- this run is NOT using a "
+                   "pinned GEMM, and its throughput is not a measurement of one")
         self._reported = True

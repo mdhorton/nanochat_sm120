@@ -2,15 +2,14 @@
 
 ## The rest of the sm120 fp8 stack
 
-`--fp8-scaling` and `--wgrad-nt` are ported
-(`nanochat/sm120/{recipe,fp8_state,fp8_backend,fp8_pinned}.py`, `csrc/pinned_gemm.cu`). Four more
+`--fp8-scaling`, `--wgrad-nt` and `--pin-gemm` are ported
+(`nanochat/sm120/{recipe,fp8_state,fp8_backend,fp8_pinned}.py`, `csrc/pinned_gemm.cu`). Three more
 flags exist in the sibling fork `/remote/projects/pycharm/sm120_nanochat`, branch **`refactor`** —
 read them with `git -C /remote/projects/pycharm/sm120_nanochat show refactor:<path>`. Its
 `dev/perf-log.md` and `dev/perf-log-experiments.md` carry the measurements below.
 
 | flag | d12 | d16 | needs | notes |
 |---|---|---|---|---|
-| `--pin-gemm all` | +6.0% | +0.8% | — | ext now in-tree; −512 MiB; collapses with depth |
 | `--fp8-weight-cache` | +1.0% | +1.5% | — | Python-only; +218–448 MiB |
 | `--fuse-wgrad-accum` | +0.7–1.9% | +1.4% | — | ext now in-tree; TE's `fuse_wgrad_accumulation` |
 | `--muon-autotune` | +0.7% | +0.7% | — | precision-independent; `--nvfp4` can take it too |
@@ -18,20 +17,23 @@ read them with `git -C /remote/projects/pycharm/sm120_nanochat show refactor:<pa
 Marginals do not add — the donor's six compound to +22.7% against +18.1% measured at d16. The
 full stack measured **240,038 tok/s** at d12/dbs 8/2 GPU against 180,890 with none of it.
 
+`--pin-gemm` landed at +1.7% here, not the donor's +6.0%: on cuBLASLt 13.6 the autotuner
+re-picks cuBLASLt's own first candidate on eight of eleven shapes, so what is left is the
+workspace gap against `_scaled_mm` rather than a mispicked algorithm. See dev/LOG_sm120.md.
+That is a reason to expect the other three marginals to read low here too.
+
 `fp8_state.py` was cut in half on the way in: `WeightCastCache`, `WgradAccumStore` and their
-factories are the two rows above that need no new kernel. `fp8_backend.py` overrides `wgrad` and
-inherits `mm_fwd`/`mm_dgrad`; the donor overrides all three, routing the other two through
-`fp8_pinned.mm` for `--pin-gemm`.
+factories are the two rows above that need no new kernel.
 
 ### The CUDA extension, now in-tree
 
 `nanochat/sm120/csrc/pinned_gemm.cu` is the donor's `dev/custom_gemm/pinned_gemm.cu` verbatim, so
-it still carries the `accum` and `fast_accum` plan kinds `--fuse-wgrad-accum` and `--pin-gemm`
-need — both are Python-only additions to `fp8_pinned.py` from here.
+it still carries the beta=1 `accum` plan kind `--fuse-wgrad-accum` needs — a Python-only addition
+to `fp8_pinned.py` from here (`mm_accum`, `mm_wgrad_accum_nt`, `_build_accum_plan`).
 
 Its build helper (`fp8_pinned._ext`) deliberately does **not** reuse
 `quartet.ext.resolve_cuda_home()`, which is major-matching and resolves torch's cu12.8. Half of
-what `--pin-gemm`/`--wgrad-nt` are worth is that the extension links the *system*
+what `--wgrad-nt` is worth is that the extension links the *system*
 `libcublasLt.so.13.6.0.2`: under 12.8 every fp8 GEMM lands on `sm89_xmma_*` (Ada kernels on a
 Blackwell card) instead of `nvjet_sm120_*`. It builds against `/usr/local/cuda` (13.3) instead,
 keys its build directory on the toolkit rather than on `torch.version.cuda`, and saves/restores
@@ -53,9 +55,8 @@ Acceptance criterion, and it is a test (`tests/test_fp8_wgrad_nt.py`):
 All three guards are in: `ExtensionUnavailable` raises rather than falling back (a build failure
 that fell back would read ~2.5% low while still printing `✓`), `_warn` puts a per-shape rejection
 on stderr, and `PerfStack.report_once` drains the plan log after the first backward and says so
-when the NT wgrad is on but no plans were built. `report_once` gates on
-`fp8_pinned.wgrad_nt()`, not on the flag, so `--wgrad-nt` without `--fp8` warns once and stays
-quiet.
+when either flag is on but no plans were built. `report_once` gates on `fp8_pinned.enabled()`,
+not on the flags, so `--pin-gemm`/`--wgrad-nt` without `--fp8` warn once and stay quiet.
 
 Measured here, d12/dbs 8/2 GPU, `--fp8 --fp8-scaling delayed` + `NANOCHAT_FA2_SWINDOW=1`,
 one `arm_batch.sh` batch: **205,028 → 228,734 tok/s (+11.6%)**, peak 9,654 → 10,640 MiB

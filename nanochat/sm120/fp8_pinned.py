@@ -1,4 +1,23 @@
-"""The natural-layout (NT) fp8 weight-gradient GEMM (`--wgrad-nt`).
+"""Pinned cuBLASLt algorithms for the fp8 GEMMs: `--pin-gemm` and `--wgrad-nt`.
+
+Two independent flags over one JIT extension, `csrc/pinned_gemm.cu`. `--pin-gemm` changes which
+algorithm runs; `--wgrad-nt` changes the layout the wgrad operands are read in. Either is
+useful without the other.
+
+## --pin-gemm {off,attn,wgrad,all}
+
+cuBLAS picks one algorithm per shape from its heuristic and `torch._scaled_mm` gives no way to
+ask for another. The donor's experiment 7 measures that pick losing 15-42% on every wgrad shape
+and 5-25% on fwd/dgrad. Each plan is autotuned on the first call for its shape -- enumerate the
+candidates, time them, keep the fastest -- then verified against `_scaled_mm` before it is
+trusted, so the algorithm is always chosen for the exact descriptors training uses rather than
+replayed from a recorded id.
+
+`attn` pins only the attention wgrad (768x768x16384 at d12), the one whose win is per-cycle
+efficiency rather than clock; `wgrad` pins every wgrad shape; `all` adds fwd and dgrad and is
+what the donor's +6.0% at d12 was measured with. The win collapses with depth: +0.8% at d16.
+
+## --wgrad-nt
 
 `grad_weight[m,n] = go[k,m].T @ x[k,n]`. FP8 on cuBLASLt is TN-only on Ada/Hopper -- both
 operands k-major -- so `nanochat/fp8.py` feeds it `go.t().contiguous()` and `_to_col_major(x)`,
@@ -18,10 +37,9 @@ failure raises: `--wgrad-nt` was passed explicitly, and a run that silently igno
 ~2.5% low while still printing its enablement line, which is how the donor's experiment 16 lost
 two arms.
 
-This is the NT slice of `sm120_nanochat@refactor:nanochat/sm120/fp8_pinned.py`; the `--pin-gemm`
-surface that shares this extension (`_MODE`, `mm`, `_build_plan`) is not ported -- see TODO.md.
-`csrc/pinned_gemm.cu` is that fork's file verbatim, so it still carries the `accum` and
-`fast_accum` plan kinds those flags need.
+`csrc/pinned_gemm.cu` is `sm120_nanochat@refactor:dev/custom_gemm/pinned_gemm.cu` verbatim, so
+it also carries the beta=1 `accum` plan kind `--fuse-wgrad-accum` needs; that flag's surface
+(`mm_accum`, `mm_wgrad_accum_nt`) is not ported -- see TODO.md.
 """
 import os
 import sys
@@ -30,11 +48,25 @@ import torch
 
 _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csrc", "pinned_gemm.cu")
 
-_WGRAD_NT = False      # --wgrad-nt
+_MODE = "off"          # --pin-gemm: off | attn | wgrad | all
+_WGRAD_NT = False      # --wgrad-nt: the layout axis, independent of _MODE
 _EXT = None
-# (m, n, k, go_dtype, x_dtype, "nt") -> PinnedGemm or None (fall back to the TN path).
+# (m, n, k, a_dtype, b_dtype, last) -> PinnedGemm or None (fall back). `last` is the layout
+# axis of the key: True/False (fast_accum, TN operands) or "nt".
 _PLANS = {}
 _LOG = []              # human-readable record of what got pinned, for the caller to print
+
+# fwd is the only role that fast-accumulates, matching `Float8Backend.mm_fwd`. Kept here rather
+# than passed in so the two stay in one place: a plan is tuned for a fast_accum setting, and
+# tuning one setting then launching the other would pin an algorithm chosen for a different op.
+_FAST_ACCUM = {"fwd": True, "dgrad": False, "wgrad": False}
+
+
+def configure(mode):
+    """Set the pinning mode. Called once from the recipe before training starts."""
+    global _MODE
+    assert mode in ("off", "attn", "wgrad", "all"), mode
+    _MODE = mode
 
 
 def configure_wgrad_nt(enabled):
@@ -49,17 +81,22 @@ def wgrad_nt():
     return _WGRAD_NT
 
 
+def enabled():
+    """True when anything here is live -- what `PerfStack.report_once` gates its report on."""
+    return _MODE != "off" or _WGRAD_NT
+
+
 def log_lines():
     return list(_LOG)
 
 
 class ExtensionUnavailable(RuntimeError):
-    """The JIT extension could not be built, so the NT wgrad cannot run at all.
+    """The JIT extension could not be built, so nothing here can run at all.
 
-    Raised rather than silently falling back to `_scaled_mm`: --wgrad-nt was passed explicitly,
-    and a run that ignores it reads ~2.5% low while still printing its enablement line. A
-    per-shape rejection is different -- that is a numerical guard doing its job, and it warns
-    and falls back.
+    Raised rather than silently falling back to `_scaled_mm`: --pin-gemm/--wgrad-nt were passed
+    explicitly, and a run that ignores them reads ~2.5% low while still printing its enablement
+    line. A per-shape rejection is different -- that is a numerical guard doing its job, and it
+    warns and falls back.
     """
 
 
@@ -129,7 +166,7 @@ def _ext():
         except Exception as e:
             raise ExtensionUnavailable(
                 f"could not build the pinned_gemm extension ({type(e).__name__}: {e}). "
-                "--wgrad-nt cannot work without it; drop the flag to run the wgrad on "
+                "--pin-gemm and --wgrad-nt cannot work without it; drop the flags to run on "
                 "_scaled_mm, or fix the build (a missing setuptools in a fresh venv is enough)."
             ) from e
         finally:
@@ -146,9 +183,9 @@ def _ext():
 _MAX_ALGOS, _ITERS, _FINALISTS, _ROUNDS = 64, 20, 8, 5
 
 
-def _fallback(a, b, a_scale, b_scale, out_dtype=torch.bfloat16):
+def _fallback(a, b, a_scale, b_scale, out_dtype=torch.bfloat16, fast_accum=False):
     return torch._scaled_mm(a, b, scale_a=a_scale, scale_b=b_scale,
-                            out_dtype=out_dtype, use_fast_accum=False)
+                            out_dtype=out_dtype, use_fast_accum=fast_accum)
 
 
 def _tn_operands(go, x):
@@ -230,3 +267,107 @@ def mm_wgrad_nt(go, x, go_scale, x_scale, out_dtype):
     if out_dtype != torch.bfloat16:  # the pinned kernel only produces bf16
         return _fallback(*_tn_operands(go, x), go_scale, x_scale, out_dtype)
     return torch.ops.nanochat.pinned_wgrad_nt(go, x, go_scale, x_scale)
+
+
+# ---------------------------------------------------------------------------
+# --pin-gemm: the same three GEMMs, run on a chosen algorithm instead of the heuristic's.
+# ---------------------------------------------------------------------------
+
+
+def _build_plan(a, b, a_scale, b_scale, fast_accum):
+    """Autotune a plan for this shape, verify it against `_scaled_mm`, or return None."""
+    m, k = a.shape
+    n = b.shape[1]
+    plan = _ext().PinnedGemm(m, n, k, a.dtype, b.dtype, fast_accum)
+    info = plan.autotune(a, b, a_scale, b_scale, _MAX_ALGOS, _ITERS, _FINALISTS, _ROUNDS)
+
+    # Trust nothing until it matches the op it replaces. A different algorithm reduces in a
+    # different order, so this is a tolerance check and not equality -- but a transposed or
+    # mis-scaled result misses by orders of magnitude, which is the actual risk here.
+    ref = _fallback(a, b, a_scale, b_scale, fast_accum=fast_accum)
+    got = plan.run(a, b, a_scale, b_scale)
+    scale = ref.abs().max().clamp(min=1e-6)
+    err = (got.float() - ref.float()).abs().max() / scale
+    if got.shape != ref.shape or not torch.isfinite(err) or err > 0.05:
+        _warn(f"  {m}x{n}x{k}: REJECTED, max rel err {float(err):.4g} vs _scaled_mm")
+        return None
+
+    # Two ratios answering different questions. vs_algo is what a better *algorithm* buys over
+    # cuBLASLt's own first candidate reached through this same extension; vs_ref is what the pin
+    # buys over the op it actually replaces. They diverge because torch queries the heuristic
+    # with its own (smaller) workspace, so `_scaled_mm` may never be offered this algorithm --
+    # and without the second number a 1.00x vs_algo reads as "nothing to win" when the
+    # end-to-end arm says otherwise.
+    ref_us = _time_fn(lambda: _fallback(a, b, a_scale, b_scale, fast_accum=fast_accum))
+    vs_algo = info["heuristic_us"] / info["us"] if info["us"] > 0 else 0.0
+    vs_ref = ref_us / info["us"] if info["us"] > 0 else 0.0
+    _LOG.append(f"  {m}x{n}x{k}{' fa' if fast_accum else ''}: algo {int(info['algo_id'])} "
+                f"tile {int(info['tile'])} splitK {int(info['splitk'])} "
+                f"reduction {int(info['reduction'])} | "
+                f"_scaled_mm {ref_us:.1f} / cand0 {info['heuristic_us']:.1f} -> "
+                f"{info['us']:.1f} us (vs_ref {vs_ref:.2f}x, vs_algo {vs_algo:.2f}x) | "
+                f"err {float(err):.2g}")
+    return plan
+
+
+# Opaque for the same reason `pinned_wgrad_nt` is: `_Float8Matmul` is `allow_in_graph`, so the
+# plan builder would otherwise be handed FakeTensors. The mode and shape decisions stay outside
+# in `mm`, where they are compile-time constants.
+@torch.library.custom_op("nanochat::pinned_mm", mutates_args=())
+def pinned_mm(a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
+              fast_accum: bool) -> torch.Tensor:
+    m, k = a.shape
+    n = b.shape[1]
+    key = (m, n, k, a.dtype, b.dtype, fast_accum)
+    if key not in _PLANS:
+        try:
+            _PLANS[key] = _build_plan(a, b, a_scale, b_scale, fast_accum)
+        except ExtensionUnavailable:  # nothing can be pinned at all -- do not fall back silently
+            raise
+        except Exception as e:  # a bad plan must never take training down with it
+            _warn(f"  {m}x{n}x{k}: FAILED to build ({type(e).__name__}: {e})")
+            _PLANS[key] = None
+    plan = _PLANS[key]
+    if plan is None:
+        return _fallback(a, b, a_scale, b_scale, fast_accum=fast_accum)
+    return plan.run(a, b, a_scale, b_scale)
+
+
+@pinned_mm.register_fake
+def _(a, b, a_scale, b_scale, fast_accum):
+    return a.new_empty((a.shape[0], b.shape[1]), dtype=torch.bfloat16)
+
+
+# Verification holds the [m, n] output twice -- the pinned result and the `_scaled_mm` reference
+# -- on top of live activations, so a huge output costs far more peak memory than a pin can win.
+# lm_head fwd is the only GEMM that trips this at d12/d16: its 16384x32768 bf16 output is 1.07 GB
+# and pinning it cost the donor +4.2 GB of peak for a measured 1.00x. Everything else is under
+# 100 MB.
+_MAX_OUTPUT_BYTES = 256 * 1024 * 1024
+
+
+def _pins(role, m, n):
+    if _MODE == "off":
+        return False
+    if m * n * 2 > _MAX_OUTPUT_BYTES:  # bf16 output
+        return False
+    if _MODE == "all":
+        return True
+    if role != "wgrad":
+        return False
+    # The attention projections are square, which is what makes them the worst case: a 768x768
+    # output reducing over every token.
+    return _MODE == "wgrad" or m == n
+
+
+def mm(a, b, a_scale, b_scale, out_dtype, role):
+    """Drop-in for `_scaled_mm` on one of the three fp8 GEMMs of a Linear.
+
+    Falls back to `_scaled_mm` whenever this role/shape is not pinned, the plan failed
+    verification, or the output dtype is not the bf16 the pinned kernel produces. The mode is
+    read at trace time, so with --pin-gemm off the compiled graph is upstream's.
+    """
+    fast_accum = _FAST_ACCUM[role]
+    if out_dtype != torch.bfloat16 or not _pins(role, a.shape[0], b.shape[1]):
+        return _fallback(a, b, a_scale, b_scale, out_dtype, fast_accum)
+    return torch.ops.nanochat.pinned_mm(a, b, a_scale, b_scale, fast_accum)
