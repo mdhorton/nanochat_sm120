@@ -25,7 +25,7 @@ records what it actually ran.
 | `--nvfp4-epilogue-alpha` | **on with `--nvfp4`** | apply the per-tensor scale inside the GEMM epilogue. **+0.35%**; also one bf16 rounding fewer, which is 0.1% of the GEMM's error and therefore not a reason on its own. Follows `--nvfp4-lt-gemm` (queue A2) |
 | `--nvfp4-fuse-wgrad` | **on with `--nvfp4`** | accumulate the weight gradient inside the wgrad epilogue (`beta=1` into an fp32 buffer) instead of by a separate cast-and-add. **+4.07% and −166 MiB — the largest item on this branch.** Follows `--nvfp4-lt-gemm` (queue A3) |
 | `--nvfp4-rne` | off | plain round-to-nearest forward instead of 4/6. **Deliberately not in the stack**: it takes accuracy away, so it is an ablation, not a recommendation |
-| `--nvfp4-hold-rht` | off | hold the backward's RHT sign pattern across the grad-accum window, re-drawn once per optimizer step, so `rht128_requant(w)` is cached with the weight cache (needs it). **Built 2026-09-01, unmeasured** -- a gradient-estimator change, so it stays off until a battery clears it (queue B3) |
+| `--nvfp4-hold-rht` | off | hold the backward's RHT sign pattern across the grad-accum window, re-drawn once per optimizer step, so `rht128_requant(w)` is cached with the weight cache (needs it). **Measured flat at d24 (2026-09-01)** and a gradient-estimator change, so it is an ablation, not a recommendation (queue B3) |
 
 `--no-nvfp4-lt-gemm` takes the two epilogue items with it, since neither is expressible through
 `_scaled_mm`; asking for one of them *and* dropping the launcher is a contradiction and raises.
@@ -929,18 +929,19 @@ follow-on that shares one per-tensor scale and is therefore not.
 
 | # | item | measured price | depends on | size |
 |---|---|---|---|---|
-| ~~**B1**~~ | ~~**Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass~~ — **built 2026-08-31, `--nvfp4-scaling delayed`** | ≤148 ms/step (4.1%) direct, **not yet measured end to end**; B2/B4 unblocked | — | M |
+| ~~**B1**~~ | ~~**Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass~~ — **built 2026-08-31, `--nvfp4-scaling delayed`; measured flat at d24, 2026-09-01** | **0% on its own.** The 148 ms was the whole time of the producer kernels the reduction was fused into; they are bandwidth-bound and read the same bytes without it. It is B2's prerequisite and nothing else: keep the code, keep `dynamic` the default, and give it no battery until B2 exists | — | M |
 | **B2** | **Fuse the quantize into its producer** so `x` is never re-read in bf16 | the ~68 ms glue gap against fp8; both quantize kernels are at 76-85% DRAM, so bytes are the currency | B1 | L |
-| **B3** | **Hold the RHT sign pattern across the grad-accum window**, re-randomizing per optimizer step — **built 2026-09-01, `--nvfp4-hold-rht`, off by default, unmeasured** | makes `rht128_requant(w)` cacheable — the withdrawn "+21%" claim in *Where the speed comes from*; realistically the weight half of the 104 ms requant row (~1.4%). Needs its own 16-run battery against plain `--nvfp4` before it can join the stack | — | **S** |
+| ~~**B3**~~ | ~~**Hold the RHT sign pattern across the grad-accum window**, re-randomizing per optimizer step~~ — **built 2026-09-01, `--nvfp4-hold-rht`; measured flat at d24 the same day. Off the queue** | The weight requant it caches is not half the 104 ms requant row: the activation requant scales with tokens per micro-step and the weight requant with the weight, so the weight share is 19% at d20/dbs 4, 35% at d24/dbs 2 and **6% at d24/dbs 16** — a ceiling of 0.2–1% of the step, under the 2% bar everywhere. Not worth an estimator change; stays as an ablation | — | S |
 | **B4** | **Fold the eden scratch round-trip** (bf16 scales written, read back, rewritten as fp8) | 35.3 ms + 7,744 launches + most of A6's `cudaMemset` | B1 | M |
 
 B1 was **Python-only** as predicted: `four_six_fp4_kernel` takes the amax as a read-only device
 pointer and `quant_fp4` already accepted an `amax=` override nothing passed, so it is
 `nanochat/sm120/nvfp4_state.py` plus one argument through `_NVFP4Matmul.forward`, with no CUDA
 touched. `DelayedScaleState` came from the fp8 port and now lives in `sm120/delayed_scale.py`,
-generalised over roles and constants. See *Delayed activation scaling* below for what it does and
-what is still unmeasured. B3 is the cheapest item on either list and has the largest unmeasured
-upside — do it early, but it *is* a change to the gradient estimator.
+generalised over roles and constants; `dev/LOG_sm120.md` (2026-08-31) records what it does. Both
+B1 and B3 then measured **flat at d24 (2026-09-01)**, which leaves nothing Python-level on this
+list: what remains with real headroom is kernel work — B2, B4, A5 — and none of it is worth
+starting before C3 answers whether the recipe wins at equal wall clock.
 
 ### C. The shipping gate, which nothing above clears
 

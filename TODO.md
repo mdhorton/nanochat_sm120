@@ -103,7 +103,13 @@ Defend that with a `cublaslt_version()` print and a `< 130600` warning, not depe
 
 ## NVFP4 queue, after B1
 
-`--nvfp4-scaling delayed` landed (queue B1). What it unblocked, from `dev/nvfp4-quartet.md`:
+`--nvfp4-scaling delayed` landed (queue B1) and **measured flat at d24 (2026-09-01)**: the amax
+pre-pass was fused into bandwidth-bound producer kernels, so removing it saves ALU, not bytes.
+B1 is B2's prerequisite and nothing more; `dynamic` stays the default and it gets no battery of
+its own. `--nvfp4-hold-rht` (B3) measured flat the same day and is off the queue -- see the
+design doc for the corrected share. Nothing Python-level is left on this list; the rest is
+kernel work, and none of it should start before C3 (equal wall clock) is answered. What B1
+unblocked, from `dev/nvfp4-quartet.md`:
 
 - **B2 — fuse the quantize into its producer** so `x` is never re-read in bf16. The ~68 ms glue
   gap against fp8; `four_six_fp4_kernel` is at 85% DRAM, so bytes are the currency. Largest item
@@ -118,10 +124,7 @@ Defend that with a `cublaslt_version()` print and a `< 130600` warning, not depe
   history, so its 6.9 ms/step over 5,808 launches collapses to a once-per-step multiply.
 - **A4 — QKV dedup.** `c_q`/`c_k`/`c_v` quantize the same `x`, so they now also carry three
   identical histories and run three identical readback reductions. A4 collapses all of it.
-- **B3 — built 2026-09-01 as `--nvfp4-hold-rht`, off by default, unmeasured.** Needs a
-  throughput A/B/A and a 16-run bpb battery against plain `--nvfp4` (d12/dbs 8/2 GPU/100
-  steps) before it can join the default stack. B1 is in the same state: both are the pending
-  batteries.
+- ~~**B3**~~ — built 2026-09-01 as `--nvfp4-hold-rht`, measured flat at d24, kept as an ablation.
 
 Not done, and worth a line: `DelayedScaleState` has a `saturated`/`headroom` counter's worth of
 information in `update()`'s `raw >= self.max` mask but does not expose it. Surfacing it would turn

@@ -61,3 +61,16 @@ requant (1,936 launches/step, ~half the 104 ms requant row) runs once per optimi
 Estimator change: one EDEN draw of the weight per window instead of one per micro-step; the
 activation requant and both gradient quantizes still draw fresh seeds every backward. Gate is a
 16-run battery against plain --nvfp4 plus an arm_batch A/B/A -- neither run yet. 5 new tests.
+
+2026-09-01 B1 and B3 both flat at d24 (96 GB card, single-arm tok/s, no batched protocol)
+--nvfp4-scaling delayed: 0%. The 148 ms/step it was priced at was the whole time of the producer
+kernels the vector_norm was fused into; they are bandwidth-bound and read the same bytes either
+way, so dropping the reduction saves ALU only, and the block-scale readback gives some back. It is
+B2's prerequisite, not a win: dynamic stays the default, no battery until B2 exists.
+--nvfp4-hold-rht: 0%. The plan priced the weight requant as half the 104 ms requant row; it is
+19% at d20/dbs 4, 35% at d24/dbs 2, 6% at d24/dbs 16 (weight elements vs M x K activation
+elements per micro-step). Ceiling 0.2-1% of the step, under the 2% bar. Off the queue.
+Same batch: plain --nvfp4 was +10% over the best fp8 stack that host could run (no --wgrad-nt:
+its extension needs the CUDA 13 toolkit's nvcc and cuBLASLt, and /usr/local/cuda there is 12.x).
+Consistent with d20's +29% over bare fp8 once fp8 delayed scaling and the larger device batch
+narrow it. Next is C3, the equal-wall-clock pair, against the fp8 flags that would actually ship.
