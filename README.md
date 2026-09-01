@@ -10,9 +10,9 @@ Here are a few questions I was curious about:
 
 - How does sm120 performance compare against H100?
 - What performance improvement will Blackwell specific features (eg, nvfp4) help in closing the gap?
-- How does the rental cost compare bwtewen sm120 and H100?
+- How does rental cost compare bwtewen sm120 and H100?
 
-All benchmarks are with Blackwell GPUs (sm120), except the H100s where noted.
+All benchmarks are done with Blackwell GPUs (sm120), except where H100s are noted.
 
 ## What are sm120 GPUs?
 
@@ -74,7 +74,7 @@ Most tests start here because this is my personal workstion setup.
 
 #### training precision: bf16
 
-base flag: none (default with no flag)
+base flag: none
 
 | toks/sec | mem GB |      bpb | extra flags                   |                   
 |---------:|-------:|---------:|-------------------------------|
@@ -127,11 +127,11 @@ best toks/USD: 1.11B
 
 NANOCHAT_FA2_WINDOWED_FLASH=1
 
-FA3 has no sm120 kernels, so the `SSSL` sliding-window default uses an explicit SDPA mask, which is very slow. The
-`--window-pattern L` option helps but it's not optimal. This new option allows it to use FA2 kernels for the S layers
-instead of SDPA masking.
+FA3 has no sm120 kernels, so the `SSSL` sliding-window default uses an explicit SDPA mask, which is slow. The
+`--window-pattern L` option helps but it's still not optimal. This new option allows it to use FA2 kernels for the S
+layers instead of SDPA masking.
 
-The implementation is mostly just some wiring code so that existing FA2 kernels are used for sliding-windows.
+The implementation is mostly just wiring code so that existing FA2 kernels are used for sliding-windows.
 
 The switch is an environment variable rather than a flag because it has to reach every entry point, including the eval
 paths that take no flags. This is an acceptable trade off given that the purpose of this repo is to explore and learn.
