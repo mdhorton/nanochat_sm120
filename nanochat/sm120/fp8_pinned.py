@@ -28,6 +28,8 @@ import sys
 
 import torch
 
+from nanochat.sm120 import gemm_cache
+
 _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csrc", "pinned_gemm.cu")
 
 _WGRAD_NT = False      # --wgrad-nt
@@ -43,6 +45,14 @@ def configure_wgrad_nt(enabled):
     _WGRAD_NT = bool(enabled)
 
 
+def configure_plan_cache(mode, exhaustive=False, max_candidates=512):
+    """Persist and reuse autotuned plans (--gemm-plan-cache), and optionally search exhaustively.
+
+    Forwards to gemm_cache so the recipe has one import to reach the whole NT wgrad surface.
+    """
+    gemm_cache.configure(mode, exhaustive=exhaustive, max_candidates=max_candidates)
+
+
 def wgrad_nt():
     """Trace-time predicate: `SM120Backend.wgrad` branches on this, so with it False the
     transpose copies stay in the graph and nothing here runs."""
@@ -50,7 +60,9 @@ def wgrad_nt():
 
 
 def log_lines():
-    return list(_LOG)
+    # Cache header first, then the per-plan lines. gemm_cache returns [] when the cache is off,
+    # which keeps report_once's "built no plans" warning reachable.
+    return gemm_cache.log_lines() + list(_LOG)
 
 
 class ExtensionUnavailable(RuntimeError):
@@ -138,12 +150,20 @@ def _ext():
                 os.environ.pop("CUDA_HOME", None)
             else:
                 os.environ["CUDA_HOME"] = saved_env
+        # The cache keys on the cuBLASLt this extension actually linked -- the toolkit's, not
+        # torch's -- so it can only learn its identity once the build has succeeded. Injected
+        # this way round because gemm_cache importing fp8_pinned back would be a cycle.
+        gemm_cache.set_env(lt_version=_EXT.cublaslt_version(), ext_tag=tag)
     return _EXT
 
 
 # Autotune budget. The screening pass over every candidate doubles as the soak that takes the
 # card off its cold boost; only the finalists are then scored round-robin with alternating order.
 _MAX_ALGOS, _ITERS, _FINALISTS, _ROUNDS = 64, 20, 8, 5
+# A restored plan skips phase 1 and therefore skips the soak; this stands in for it.
+_SOAK_ITERS = 200
+# How far a restored plan may re-time above what was stored before it is worth saying so.
+_STALE_US_RATIO = 1.15
 
 
 def _fallback(a, b, a_scale, b_scale, out_dtype=torch.bfloat16):
@@ -168,32 +188,92 @@ def _time_fn(fn, iters=_ITERS):
     return t0.elapsed_time(t1) * 1000.0 / iters
 
 
+def _tuned_provenance(info):
+    """Which search produced this pick. Keyed on the requested tier, not on what enumeration
+    happened to return, so it always matches the tier the cache stores."""
+    if gemm_cache.exhaustive():
+        return (f"TUNED exhaustive ({int(info.get('kept', 0))}/"
+                f"{int(info.get('enumerated', 0))} cand, "
+                f"{info.get('tune_ms', 0.0) / 1000.0:.1f} s)")
+    return f"TUNED heuristic ({int(info.get('heuristic_count', 0))} cand)"
+
+
 def _build_wgrad_nt_plan(go, x, go_scale, x_scale):
-    """Autotune an NT wgrad plan and verify it against the TN path it replaces.
+    """Get an NT wgrad plan -- restored from the cache when one fits, otherwise autotuned -- and
+    verify it against the TN path it replaces.
 
     The reference is built through the same transpose copies the plan exists to delete -- a
     startup-only cost. ref_us times those copies too, because they are part of the op being
     replaced: the fair comparison is (t() + _scaled_mm) against the NT launch alone.
+
+    At most two passes: a cached plan that will not restore, or that fails verification, warns
+    and falls through to a fresh tune exactly once, so a poisoned entry cannot loop.
     """
     k, m = go.shape                    # k = tokens, m = out_features (weight rows)
     n = x.shape[1]                     # n = in_features (weight cols)
-    plan = _ext().PinnedGemm(m, n, k, go.dtype, x.dtype, False, accum=False, nt=True)
-    info = plan.autotune(go, x, go_scale, x_scale, _MAX_ALGOS, _ITERS, _FINALISTS, _ROUNDS)
+    cache_key = gemm_cache.plan_key(m, n, k, go.dtype, x.dtype, "nt")
+    want_budget = gemm_cache.budget(_MAX_ALGOS, _ITERS, _FINALISTS, _ROUNDS)
 
-    ref = _fallback(*_tn_operands(go, x), go_scale, x_scale)
-    got = plan.run(go, x, go_scale, x_scale)
-    scale = ref.abs().max().clamp(min=1e-6)
-    err = (got.float() - ref.float()).abs().max() / scale
-    if got.shape != ref.shape or not torch.isfinite(err) or err > 0.05:
-        _warn(f"  {m}x{n}x{k} nt: REJECTED, max rel err {float(err):.4g} vs t()+_scaled_mm")
-        return None
+    for allow_cache in (True, False):
+        plan = _ext().PinnedGemm(m, n, k, go.dtype, x.dtype, False, accum=False, nt=True)
+        entry = gemm_cache.lookup(cache_key, want_budget) if allow_cache else None
 
-    ref_us = _time_fn(lambda: _fallback(*_tn_operands(go, x), go_scale, x_scale))
-    vs_ref = ref_us / info["us"] if info["us"] > 0 else 0.0
-    _LOG.append(f"  {m}x{n}x{k} nt: algo {int(info['algo_id'])} tile {int(info['tile'])} "
-                f"splitK {int(info['splitk'])} | t()+_scaled_mm {ref_us:.1f} -> "
-                f"{info['us']:.1f} us (vs_ref {vs_ref:.2f}x) | err {float(err):.2g}")
-    return plan
+        if entry is not None:
+            cfg = {name: float(v) for name, v in entry["algo"].items()}
+            if not plan.restore(go, x, go_scale, x_scale, cfg):
+                _warn(f"  {m}x{n}x{k} nt: STALE cache entry (algo "
+                      f"{entry['algo'].get('algo_id')} would not restore), re-tuning")
+                gemm_cache.invalidate(cache_key, "restore")
+                continue
+            # A hit skips phase 1, which was also the soak that takes the card off its cold
+            # boost. Without a stand-in, ref_us below would be measured on a colder card than a
+            # tuned run's and the printed ratio would not be comparable between the two.
+            #
+            # plan.time, not _time_fn(plan.run): the tuner timed a bare launch loop in C++, and
+            # run() adds an output allocation and a pybind crossing per call. Comparing the two
+            # would read a fixed overhead as a stale plan on every small shape.
+            plan.time(go, x, go_scale, x_scale, _SOAK_ITERS)
+            info = dict(entry)
+            info.update(cfg)
+            info["us"] = plan.time(go, x, go_scale, x_scale, _ITERS)
+        else:
+            info = plan.autotune(
+                go, x, go_scale, x_scale, _MAX_ALGOS, _ITERS, _FINALISTS, _ROUNDS,
+                gemm_cache.max_candidates() if gemm_cache.exhaustive() else 0)
+
+        ref = _fallback(*_tn_operands(go, x), go_scale, x_scale)
+        got = plan.run(go, x, go_scale, x_scale)
+        scale = ref.abs().max().clamp(min=1e-6)
+        err = (got.float() - ref.float()).abs().max() / scale
+        if got.shape != ref.shape or not torch.isfinite(err) or err > 0.05:
+            if entry is not None:
+                _warn(f"  {m}x{n}x{k} nt: CACHED plan FAILED verification, max rel err "
+                      f"{float(err):.4g}, re-tuning")
+                gemm_cache.invalidate(cache_key, "verify")
+                continue
+            _warn(f"  {m}x{n}x{k} nt: REJECTED, max rel err {float(err):.4g} vs t()+_scaled_mm")
+            return None
+
+        ref_us = _time_fn(lambda: _fallback(*_tn_operands(go, x), go_scale, x_scale))
+        vs_ref = ref_us / info["us"] if info["us"] > 0 else 0.0
+        if entry is None:
+            gemm_cache.store(cache_key, plan.config(), info, want_budget)
+            prov = _tuned_provenance(info)
+        else:
+            prov = (f"CACHED {entry['tier']}, tuned {entry['tuned_at']} "
+                    f"(stored {entry['us']:.1f} us)")
+            # Numerics cannot see a *different but valid* restored kernel -- a wrong tile is
+            # still arithmetically correct. A large timing gap is the only signal that one came
+            # back, or that the card is in a different clock state than when this was tuned.
+            if info["us"] > entry["us"] * _STALE_US_RATIO:
+                _warn(f"  {m}x{n}x{k} nt: cached plan re-times {info['us']:.1f} us vs "
+                      f"{entry['us']:.1f} us stored -- restored kernel may differ, or the card "
+                      f"is in a different clock state")
+        _LOG.append(f"  {m}x{n}x{k} nt: algo {int(info['algo_id'])} tile {int(info['tile'])} "
+                    f"splitK {int(info['splitk'])} | t()+_scaled_mm {ref_us:.1f} -> "
+                    f"{info['us']:.1f} us (vs_ref {vs_ref:.2f}x) | err {float(err):.2g} | {prov}")
+        return plan
+    return None
 
 
 # An opaque custom op, not a plain function: `_Float8Matmul` is `allow_in_graph`, so AOTAutograd

@@ -37,9 +37,21 @@ def add_args(parser):
                    help="NVFP4 activation scale source. 'delayed' takes the per-tensor amax from a history instead of a vector_norm pre-pass over the activation, and reads the next one back off the e4m3 block scales -- 32x fewer bytes (dev/nvfp4-quartet.md, queue B1). Needs --nvfp4 and 4/6 rounding. Numerics-affecting, so it is not part of the --nvfp4 bundle")
     g.add_argument("--wgrad-nt", action="store_true",
                    help="run the weight-grad GEMMs in the natural (NT) operand layout, which sm120's cuBLASLt accepts, instead of building the transposed copies the TN form needs -- deletes the pure-copy fp8 transpose kernels, 4.6%% of a step: +8.4%% at d12. Needs --fp8, and JIT-builds csrc/pinned_gemm.cu on first use. Costs ~1.7 GB of peak memory")
+    g.add_argument("--gemm-plan-cache", type=str, default="off",
+                   choices=["off", "use", "refresh"],
+                   help="persist the --wgrad-nt autotune result under $NANOCHAT_BASE_DIR/gemm_plans, keyed on GPU and cuBLASLt version, so kernel selection is identical across runs and startup skips the tune. Without it two algorithms within timing noise swap winners between otherwise identical runs. 'use' reads and writes; 'refresh' ignores what is stored, re-tunes and overwrites -- for after locking clocks with nvidia-smi -lgc, since clock state is not in the key. Every hit is still verified against t()+_scaled_mm before it is trusted, and every plan logs TUNED or CACHED")
+    g.add_argument("--gemm-autotune-exhaustive", action="store_true",
+                   help="screen every algorithm the cuBLASLt capability API reports for the shape (algo x tile x stages x splitK x reduction x swizzle x custom) instead of the heuristic's first 64. Costs seconds per shape, so it is worth pairing with --gemm-plan-cache use. Cached entries record which search found them, so an exhaustive request never replays a heuristic-tier plan: populating the cache with ordinary runs and adding this flag later still re-tunes")
+    g.add_argument("--gemm-autotune-max-candidates", type=int, default=512,
+                   help="--gemm-autotune-exhaustive: cap on the enumerated cross product, which is thousands wide before the cap and would push tuning into minutes. Part of the cache tier, so raising it invalidates entries tuned at a lower cap")
     g.add_argument("--fp8-exclude", type=str, default="",
                    help="comma-separated Linear names to keep in bf16 under --fp8, matched against the last component of the module fqn (e.g. 'lm_head'). Each fp8 Linear costs an amax+cast+transpose pass over its activations; for a layer whose GEMM saving is small relative to that traffic, bf16 can win")
     return g
+
+
+def _gemm_flags_asked(args):
+    """Whether either NT wgrad autotune flag was passed, for the 'ignoring' warnings."""
+    return args.gemm_plan_cache != "off" or args.gemm_autotune_exhaustive
 
 
 def module_filter(args):
@@ -78,6 +90,9 @@ def apply(model, args, device_type):
             print0(f"Warning: --fp8-scaling {args.fp8_scaling} needs --fp8, ignoring")
         if args.wgrad_nt:
             print0("Warning: --wgrad-nt needs --fp8, ignoring")
+        if _gemm_flags_asked(args):
+            print0("Warning: --gemm-plan-cache / --gemm-autotune-exhaustive need "
+                   "--fp8 --wgrad-nt, ignoring")
         return stack
     if device_type != "cuda":
         print0("Warning: FP8 training requires CUDA, ignoring --fp8 flag")
@@ -111,7 +126,19 @@ def apply(model, args, device_type):
                f"margin {args.amax_margin}{ar}")
     if args.wgrad_nt:
         fp8_pinned.configure_wgrad_nt(True)
+        fp8_pinned.configure_plan_cache(args.gemm_plan_cache,
+                                        exhaustive=args.gemm_autotune_exhaustive,
+                                        max_candidates=args.gemm_autotune_max_candidates)
         print0("✓ natural-layout (NT) wgrad: transpose copies removed from the backward")
+        if _gemm_flags_asked(args):
+            search = "exhaustive" if args.gemm_autotune_exhaustive else "heuristic"
+            cap = f" (max {args.gemm_autotune_max_candidates} cand)" \
+                if args.gemm_autotune_exhaustive else ""
+            print0(f"✓ gemm plan cache {args.gemm_plan_cache}, {search} autotune{cap}")
+    elif _gemm_flags_asked(args):
+        # These govern nothing but the NT wgrad, so silence would let someone believe a cache is
+        # in play for a run that never builds a plan at all.
+        print0("Warning: --gemm-plan-cache / --gemm-autotune-exhaustive need --wgrad-nt, ignoring")
     return stack
 
 

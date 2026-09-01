@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(not cuda_available, reason="fp8 tests require CU
 
 if cuda_available:
     from nanochat.fp8 import _to_col_major, _to_fp8
-    from nanochat.sm120 import fp8_pinned
+    from nanochat.sm120 import fp8_pinned, gemm_cache
 
 DEVICE = "cuda"
 E4M3, E5M2 = torch.float8_e4m3fn, torch.float8_e5m2
@@ -42,6 +42,7 @@ def reset_flag():
     """Each test sets the flag itself; leaking it into the next would silently skip the NT path."""
     yield
     fp8_pinned.configure_wgrad_nt(False)
+    gemm_cache.reset()
 
 
 def nt_operands(m, n, k):
@@ -140,3 +141,176 @@ def test_the_extension_links_cublaslt_13():
     needed = subprocess.check_output(["objdump", "-p", so], text=True)
     libs = [ln.split()[-1] for ln in needed.splitlines() if "NEEDED" in ln]
     assert any(lib.startswith("libcublasLt.so.13") for lib in libs), libs
+
+
+# --- plan cache (--gemm-plan-cache) and exhaustive autotune -------------------------------
+#
+# These call _build_wgrad_nt_plan directly rather than going through mm_wgrad_nt: it bypasses
+# the _PLANS memo, so a shape can be built twice in one process, which is the whole point.
+# The shape is small and NON-SQUARE, so a transpose bug cannot hide behind m == n.
+
+CACHE_MNK = (256, 512, 512)
+
+
+@pytest.fixture
+def cache_file(tmp_path, monkeypatch):
+    """Point the cache at a private file. Patches gemm_cache.path rather than NANOCHAT_BASE_DIR,
+    which also names the JIT build directory -- moving that would rebuild the extension."""
+    import json
+
+    f = tmp_path / "plans.json"
+    monkeypatch.setattr(gemm_cache, "path", lambda: str(f))
+
+    class Handle:
+        path = f
+
+        def read(self):
+            return json.loads(f.read_text())
+
+        def write(self, doc):
+            f.write_text(json.dumps(doc))
+
+        def plans(self):
+            return self.read()["plans"]
+
+        def only(self):
+            plans = self.plans()
+            assert len(plans) == 1, f"expected exactly one entry, got {list(plans)}"
+            return next(iter(plans.values()))
+
+    yield Handle()
+
+
+def build(cache="off", exhaustive=False, max_candidates=512, mnk=CACHE_MNK):
+    """Build one plan and return (plan, its log line).
+
+    Warnings -- a stale entry, a slow re-time -- are logged ahead of the plan's own line, so the
+    line of interest is the last one. Tests that care about a warning read fp8_pinned._LOG, which
+    stays intact until the next build.
+    """
+    fp8_pinned.configure_plan_cache(cache, exhaustive=exhaustive, max_candidates=max_candidates)
+    go, x, gi, xi = nt_operands(*mnk)
+    fp8_pinned._LOG.clear()
+    plan = fp8_pinned._build_wgrad_nt_plan(go, x, gi, xi)
+    assert plan is not None, "the plan failed verification outright"
+    assert fp8_pinned._LOG, "a built plan must log how it was obtained"
+    return plan, fp8_pinned._LOG[-1]
+
+
+def test_cache_round_trip(cache_file):
+    """Tune, persist, restore -- and the restored config must match key for key.
+
+    The equality is what catches a dropped axis: inner_shape and cluster_shape are uint16_t and
+    reading them at the wrong width returns -1 silently, which would restore a *different*
+    kernel that still passes every numeric check below.
+    """
+    plan, line = build(cache="use")
+    assert "TUNED heuristic" in line
+    stored = cache_file.only()
+    assert stored["tier"] == "heuristic"
+    assert stored["algo"] == {k: int(v) for k, v in plan.config().items()}
+
+    plan2, line2 = build(cache="use")
+    assert "CACHED heuristic" in line2
+    assert "TUNED" not in line2
+    assert plan2.config() == plan.config(), "restore must reproduce the config exactly"
+    # The re-timing must be comparable to the stored one, i.e. measured the same way. Timing
+    # run() instead of the bare launch loop would trip this on every small shape.
+    assert not any("re-times" in ln for ln in fp8_pinned._LOG), fp8_pinned._LOG
+
+    # and it still computes the right thing
+    go, x, gi, xi = nt_operands(*CACHE_MNK)
+    assert rel_err(plan2.run(go, x, gi, xi), tn_reference(go, x, gi, xi)) < 0.05
+
+
+def test_tier_upgrade_retunes(cache_file):
+    """A heuristic entry must not satisfy an exhaustive request -- the point of the tier."""
+    build(cache="use")
+    first = cache_file.only()
+    assert first["tier"] == "heuristic"
+
+    _, line = build(cache="use", exhaustive=True, max_candidates=128)
+    assert "TUNED exhaustive" in line, "an exhaustive request replayed a heuristic-tier plan"
+    upgraded = cache_file.only()
+    assert upgraded["tier"] == "exhaustive"
+    assert upgraded["budget"]["max_candidates"] == 128
+
+    # ...and the upgraded entry now serves a plain request, since upgrades are monotone.
+    _, line = build(cache="use")
+    assert "CACHED exhaustive" in line
+
+
+def test_stale_entry_self_heals_on_bad_algo_id(cache_file):
+    """A retired algo id (the shape a cuBLAS bump takes) must warn, re-tune and overwrite."""
+    build(cache="use")
+    doc = cache_file.read()
+    key = next(iter(doc["plans"]))
+    doc["plans"][key]["algo"]["algo_id"] = 9999
+    cache_file.write(doc)
+
+    _, line = build(cache="use")
+    assert "TUNED" in line, "a stale entry must fall through to a fresh tune"
+    assert any("STALE" in ln for ln in fp8_pinned._LOG), "the self-heal must be visible"
+    assert cache_file.only()["algo"]["algo_id"] != 9999, "the bad entry must be replaced"
+
+
+def test_stale_entry_self_heals_on_unsupported_config(cache_file):
+    """AlgoInit accepts the id but AlgoCheck rejects the config -- a distinct failure gate."""
+    build(cache="use")
+    doc = cache_file.read()
+    key = next(iter(doc["plans"]))
+    doc["plans"][key]["algo"]["tile"] = 3       # a real tile id this algo will not support
+    cache_file.write(doc)
+
+    _, line = build(cache="use")
+    assert "TUNED" in line
+    assert any("STALE" in ln for ln in fp8_pinned._LOG)
+    assert cache_file.only()["algo"]["tile"] != 3
+
+
+def test_default_writes_nothing(cache_file):
+    """No flags: no file, no CACHED line. The default-behaviour-unchanged guarantee."""
+    _, line = build(cache="off")
+    assert not cache_file.path.exists(), "the cache must be inert unless asked for"
+    assert "TUNED heuristic" in line and "CACHED" not in line
+
+
+def test_refresh_retunes_but_persists(cache_file):
+    build(cache="use")
+    _, line = build(cache="refresh")
+    assert "TUNED" in line, "refresh must ignore what is stored"
+    assert cache_file.only()["tier"] == "heuristic", "refresh must still write"
+
+
+def test_exhaustive_enumerates_a_superset():
+    """Exhaustive must genuinely search wider, and never land below cuBLAS's own pick."""
+    go, x, gi, xi = nt_operands(*CACHE_MNK)
+    m, n, k = CACHE_MNK
+    plan = fp8_pinned._ext().PinnedGemm(m, n, k, go.dtype, x.dtype, False, accum=False, nt=True)
+    info = plan.autotune(go, x, gi, xi, 64, 20, 8, 5, 256)
+
+    assert info["ids"] > 0
+    assert info["enumerated"] > info["heuristic_count"]
+    assert info["kept"] > info["heuristic_count"], "enumeration added no candidates"
+    # The heuristic's own pick is always seeded, so the winner can only tie or beat it.
+    assert info["us"] <= info["heuristic_us"] * 1.05
+
+
+def test_exhaustive_is_bounded():
+    """The cap is the mitigation for a cross product that is ~10^5 wide before it."""
+    go, x, gi, xi = nt_operands(*CACHE_MNK)
+    m, n, k = CACHE_MNK
+    plan = fp8_pinned._ext().PinnedGemm(m, n, k, go.dtype, x.dtype, False, accum=False, nt=True)
+    info = plan.autotune(go, x, gi, xi, 64, 20, 8, 5, 128)
+    assert info["kept"] <= 128
+    assert info["tune_ms"] < 30_000, f"tuning took {info['tune_ms'] / 1000:.1f} s"
+
+
+def test_exhaustive_off_by_default_is_heuristic_only():
+    """The ninth argument defaulting to 0 is what keeps the pre-cache path byte-identical."""
+    go, x, gi, xi = nt_operands(*CACHE_MNK)
+    m, n, k = CACHE_MNK
+    plan = fp8_pinned._ext().PinnedGemm(m, n, k, go.dtype, x.dtype, False, accum=False, nt=True)
+    info = plan.autotune(go, x, gi, xi, 64, 20, 8, 5)
+    assert info["kept"] == info["heuristic_count"]
+    assert info["enumerated"] == 0, "the capability API must not be touched at all"

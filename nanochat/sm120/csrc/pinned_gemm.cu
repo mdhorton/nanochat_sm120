@@ -39,7 +39,10 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -60,6 +63,58 @@ int get_cfg(const cublasLtMatmulAlgo_t& algo, cublasLtMatmulAlgoConfigAttributes
         return -1;
     }
     return v;
+}
+
+// INNER_SHAPE_ID and CLUSTER_SHAPE_ID are uint16_t, not uint32_t. Reading them through get_cfg
+// is a size mismatch that ConfigGetAttribute rejects, so it returns -1 and the value is silently
+// dropped -- which would restore a *different* kernel that still passes numerics.
+int get_cfg16(const cublasLtMatmulAlgo_t& algo, cublasLtMatmulAlgoConfigAttributes_t attr) {
+    uint16_t v = 0;
+    size_t written = 0;
+    if (cublasLtMatmulAlgoConfigGetAttribute(&algo, attr, &v, sizeof(v), &written)
+        != CUBLAS_STATUS_SUCCESS) {
+        return -1;
+    }
+    return int(v);
+}
+
+// Soft setters: restore() must be able to reject a stale config and let the caller re-tune, so
+// these return the status instead of LT_CHECK-ing it into an exception.
+cublasStatus_t set_cfg(cublasLtMatmulAlgo_t& algo, cublasLtMatmulAlgoConfigAttributes_t attr,
+                       int value) {
+    const int32_t v = int32_t(value);
+    return cublasLtMatmulAlgoConfigSetAttribute(&algo, attr, &v, sizeof(v));
+}
+
+cublasStatus_t set_cfg16(cublasLtMatmulAlgo_t& algo, cublasLtMatmulAlgoConfigAttributes_t attr,
+                         int value) {
+    const uint16_t v = uint16_t(value);
+    return cublasLtMatmulAlgoConfigSetAttribute(&algo, attr, &v, sizeof(v));
+}
+
+// The nine config axes that define a plan, in the canonical order the cache serializes.
+struct CfgAxis {
+    const char* key;
+    cublasLtMatmulAlgoConfigAttributes_t attr;
+    bool is16;
+};
+const CfgAxis kCfgAxes[] = {
+    {"algo_id",       CUBLASLT_ALGO_CONFIG_ID,                false},
+    {"tile",          CUBLASLT_ALGO_CONFIG_TILE_ID,           false},
+    {"stages",        CUBLASLT_ALGO_CONFIG_STAGES_ID,         false},
+    {"splitk",        CUBLASLT_ALGO_CONFIG_SPLITK_NUM,        false},
+    {"reduction",     CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,  false},
+    {"swizzle",       CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING,     false},
+    {"custom",        CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION,     false},
+    {"inner_shape",   CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID,    true},
+    {"cluster_shape", CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID,  true},
+};
+
+std::map<std::string, double> read_cfg(const cublasLtMatmulAlgo_t& algo) {
+    std::map<std::string, double> cfg;
+    for (const auto& ax : kCfgAxes)
+        cfg[ax.key] = ax.is16 ? get_cfg16(algo, ax.attr) : get_cfg(algo, ax.attr);
+    return cfg;
 }
 
 cudaDataType_t fp8_type(torch::ScalarType t) {
@@ -86,6 +141,13 @@ public:
                bool accum = false, bool nt = false)
         : m_(m), n_(n), k_(k), accum_(accum), nt_(nt) {
 
+        // The dtype triple AlgoInit and AlgoGetIds need, computed once. Operands are swapped
+        // (see file header), so Adesc describes *b*: a_type_ is b_dtype's, not a_dtype's.
+        // Getting that backwards enumerates and restores against the wrong dtype pair.
+        a_type_ = fp8_type(b_dtype);
+        b_type_ = fp8_type(a_dtype);
+        d_type_ = accum_ ? CUDA_R_32F : CUDA_R_16BF;
+
         LT_CHECK(cublasLtCreate(&lt_));
         LT_CHECK(cublasLtMatmulDescCreate(&desc_, CUBLAS_COMPUTE_32F, CUDA_R_32F));
         cublasOperation_t op_a = nt_ ? CUBLAS_OP_N : CUBLAS_OP_T;
@@ -102,13 +164,13 @@ public:
         // Operands swapped (see file header): Adesc describes b, Bdesc describes a. Under nt
         // each stored shape flips with its op, so op(A)/op(B) are the same matrices either way.
         if (nt_) {
-            LT_CHECK(cublasLtMatrixLayoutCreate(&Adesc_, fp8_type(b_dtype), n, k, n));
-            LT_CHECK(cublasLtMatrixLayoutCreate(&Bdesc_, fp8_type(a_dtype), m, k, m));
+            LT_CHECK(cublasLtMatrixLayoutCreate(&Adesc_, a_type_, n, k, n));
+            LT_CHECK(cublasLtMatrixLayoutCreate(&Bdesc_, b_type_, m, k, m));
         } else {
-            LT_CHECK(cublasLtMatrixLayoutCreate(&Adesc_, fp8_type(b_dtype), k, n, k));
-            LT_CHECK(cublasLtMatrixLayoutCreate(&Bdesc_, fp8_type(a_dtype), k, m, k));
+            LT_CHECK(cublasLtMatrixLayoutCreate(&Adesc_, a_type_, k, n, k));
+            LT_CHECK(cublasLtMatrixLayoutCreate(&Bdesc_, b_type_, k, m, k));
         }
-        LT_CHECK(cublasLtMatrixLayoutCreate(&Ddesc_, accum_ ? CUDA_R_32F : CUDA_R_16BF, n, m, n));
+        LT_CHECK(cublasLtMatrixLayoutCreate(&Ddesc_, d_type_, n, m, n));
     }
 
     PinnedGemm(const PinnedGemm&) = delete;
@@ -130,21 +192,21 @@ public:
     // times candidate 0 -- cuBLAS's own pick -- first, on a card still at its ~2460 MHz cold
     // boost, and every later candidate at a lower clock. That biases both the reported ratio and
     // the selection toward candidate 0, which is what the first version of this did.
+    // exhaustive_max_candidates == 0 keeps the heuristic-only candidate set, i.e. exactly the
+    // behaviour this had before the cache landed. Anything higher enumerates the capability API
+    // and caps the survivors there; phases 1 and 2 below are identical either way.
     std::map<std::string, double> autotune(torch::Tensor a, torch::Tensor b,
                                            torch::Tensor a_scale, torch::Tensor b_scale,
                                            int64_t max_algos, int64_t iters,
-                                           int64_t finalists, int64_t rounds) {
+                                           int64_t finalists, int64_t rounds,
+                                           int64_t exhaustive_max_candidates = 0) {
         check_operands(a, b);
-        cublasLtMatmulPreference_t pref = nullptr;
-        size_t ws_bytes = workspace_bytes();
-        LT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
-        LT_CHECK(cublasLtMatmulPreferenceSetAttribute(
-            pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes, sizeof(ws_bytes)));
-        std::vector<cublasLtMatmulHeuristicResult_t> results(max_algos);
-        int returned = 0;
-        LT_CHECK(cublasLtMatmulAlgoGetHeuristic(lt_, desc_, Adesc_, Bdesc_, Ddesc_, Ddesc_, pref,
-                                                int(max_algos), results.data(), &returned));
-        cublasLtMatmulPreferenceDestroy(pref);
+        const auto tune_t0 = std::chrono::steady_clock::now();
+        int heuristic_count = 0;
+        std::map<std::string, double> stats;
+        std::vector<cublasLtMatmulHeuristicResult_t> results =
+            enumerate(max_algos, exhaustive_max_candidates, &heuristic_count, &stats);
+        int returned = int(results.size());
         TORCH_CHECK(returned > 0, "cuBLASLt returned no algorithms for this shape");
 
         // Accum plans time with beta=1 into a scratch buffer (zeroed: garbage fp32 could hold
@@ -213,14 +275,76 @@ public:
         info["screen_heuristic_us"] = screen_us[heuristic_i];
         info["finalists"] = double(pool.size());
         info["rounds"] = double(rounds);
-        info["tile"] = get_cfg(algo_, CUBLASLT_ALGO_CONFIG_TILE_ID);
-        info["splitk"] = get_cfg(algo_, CUBLASLT_ALGO_CONFIG_SPLITK_NUM);
-        info["reduction"] = get_cfg(algo_, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME);
-        info["stages"] = get_cfg(algo_, CUBLASLT_ALGO_CONFIG_STAGES_ID);
-        info["algo_id"] = get_cfg(algo_, CUBLASLT_ALGO_CONFIG_ID);
-        info["swizzle"] = get_cfg(algo_, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING);
+        // One definition of what a plan is: the same nine axes config() returns and the cache
+        // persists, so a key can never be tuned into the log but dropped on the way to disk.
+        for (const auto& kv : read_cfg(algo_)) info[kv.first] = kv.second;
         info["waves"] = results[best_i].wavesCount;
+        info["heuristic_count"] = double(heuristic_count);
+        for (const auto& kv : stats) info[kv.first] = kv.second;
+        info["tune_ms"] = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - tune_t0).count();
         return info;
+    }
+
+    // The serialization surface: exactly what restore() consumes.
+    std::map<std::string, double> config() const {
+        TORCH_CHECK(pinned_, "PinnedGemm.config() before autotune()/restore()");
+        return read_cfg(algo_);
+    }
+
+    // Rebuild a plan from a cached config. Returns false -- never throws -- for every way a
+    // stored entry can go stale, so the caller can warn, invalidate and re-tune.
+    bool restore(torch::Tensor a, torch::Tensor b, torch::Tensor a_scale, torch::Tensor b_scale,
+                 std::map<std::string, double> cfg) {
+        check_operands(a, b);
+        auto it = cfg.find("algo_id");
+        if (it == cfg.end() || it->second < 0) return false;
+
+        cublasLtMatmulAlgo_t algo{};
+        // A cuBLAS bump can retire an id, or drop its support for this dtype pair.
+        if (cublasLtMatmulAlgoInit(lt_, CUBLAS_COMPUTE_32F, CUDA_R_32F, a_type_, b_type_, d_type_,
+                                   d_type_, int(it->second), &algo) != CUBLAS_STATUS_SUCCESS)
+            return false;
+
+        // A missing or -1 axis keeps AlgoInit's default: an older cache file that predates an
+        // axis restores as the default rather than being thrown away.
+        for (const auto& ax : kCfgAxes) {
+            if (std::string(ax.key) == "algo_id") continue;
+            auto f = cfg.find(ax.key);
+            if (f == cfg.end() || f->second < 0) continue;
+            auto st = ax.is16 ? set_cfg16(algo, ax.attr, int(f->second))
+                              : set_cfg(algo, ax.attr, int(f->second));
+            if (st != CUBLAS_STATUS_SUCCESS) return false;
+        }
+
+        cublasLtMatmulHeuristicResult_t check{};
+        if (cublasLtMatmulAlgoCheck(lt_, desc_, Adesc_, Bdesc_, Ddesc_, Ddesc_, &algo, &check)
+            != CUBLAS_STATUS_SUCCESS)
+            return false;
+        if (check.workspaceSize > workspace_bytes()) return false;
+
+        // AlgoCheck success does not guarantee the algo actually runs (cublasLt.h), which is why
+        // phase 1 filters on a real launch too. Do the same here before trusting the plan.
+        auto out = accum_ ? torch::zeros({m_, n_}, a.options().dtype(torch::kFloat32))
+                          : torch::empty({m_, n_}, a.options().dtype(torch::kBFloat16));
+        if (launch(algo, a, b, a_scale, b_scale, out) != CUBLAS_STATUS_SUCCESS) return false;
+
+        algo_ = algo;
+        pinned_ = true;
+        return true;
+    }
+
+    // Time the pinned algorithm through the same inner loop autotune used, so a restored plan's
+    // re-timing is comparable to the number that was stored. Timing run() instead would compare
+    // two different things: it allocates its output and crosses pybind on every call, which is
+    // 0.2% of a 50 us GEMM but nearly doubles a 5 us one.
+    double time(torch::Tensor a, torch::Tensor b, torch::Tensor a_scale, torch::Tensor b_scale,
+                int64_t iters) {
+        TORCH_CHECK(pinned_, "PinnedGemm.time() before autotune()/restore()");
+        check_operands(a, b);
+        auto out = accum_ ? torch::zeros({m_, n_}, a.options().dtype(torch::kFloat32))
+                          : torch::empty({m_, n_}, a.options().dtype(torch::kBFloat16));
+        return time_algo(algo_, a, b, a_scale, b_scale, out, iters);
     }
 
     torch::Tensor run(torch::Tensor a, torch::Tensor b,
@@ -248,6 +372,170 @@ public:
     }
 
 private:
+    // Query a variable-length uint32 capability (TILE_IDS, STAGES_IDS) with the two-call idiom:
+    // sizeInBytes 0 returns the byte count, then read into a buffer of that size.
+    std::vector<int> cap_list(const cublasLtMatmulAlgo_t& algo,
+                              cublasLtMatmulAlgoCapAttributes_t attr, int fallback) const {
+        size_t written = 0;
+        if (cublasLtMatmulAlgoCapGetAttribute(&algo, attr, nullptr, 0, &written)
+                != CUBLAS_STATUS_SUCCESS || written == 0)
+            return {fallback};
+        std::vector<uint32_t> buf(written / sizeof(uint32_t));
+        if (cublasLtMatmulAlgoCapGetAttribute(&algo, attr, buf.data(), written, &written)
+            != CUBLAS_STATUS_SUCCESS)
+            return {fallback};
+        std::vector<int> out;
+        for (uint32_t v : buf) out.push_back(int(v));
+        if (out.empty()) return {fallback};
+        return out;
+    }
+
+    int cap_int(const cublasLtMatmulAlgo_t& algo, cublasLtMatmulAlgoCapAttributes_t attr,
+                int fallback) const {
+        int v = fallback;
+        size_t written = 0;
+        if (cublasLtMatmulAlgoCapGetAttribute(&algo, attr, &v, sizeof(v), &written)
+            != CUBLAS_STATUS_SUCCESS)
+            return fallback;
+        return v;
+    }
+
+    // The candidate set phases 1 and 2 consume. Always seeded with the heuristic's own results,
+    // so heuristic_i stays meaningful and an exhaustive search is a strict superset of a
+    // heuristic one -- which is what makes the cache's tier ordering an honest claim.
+    std::vector<cublasLtMatmulHeuristicResult_t> enumerate(
+            int64_t max_algos, int64_t max_candidates, int* heuristic_count,
+            std::map<std::string, double>* stats) {
+        cublasLtMatmulPreference_t pref = nullptr;
+        size_t ws_bytes = workspace_bytes();
+        LT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
+        LT_CHECK(cublasLtMatmulPreferenceSetAttribute(
+            pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes, sizeof(ws_bytes)));
+        std::vector<cublasLtMatmulHeuristicResult_t> results(max_algos);
+        int returned = 0;
+        LT_CHECK(cublasLtMatmulAlgoGetHeuristic(lt_, desc_, Adesc_, Bdesc_, Ddesc_, Ddesc_, pref,
+                                                int(max_algos), results.data(), &returned));
+        cublasLtMatmulPreferenceDestroy(pref);
+        results.resize(returned);
+        *heuristic_count = returned;
+        (*stats)["enumerated"] = 0.0;
+        (*stats)["checked"] = 0.0;
+        (*stats)["ids"] = 0.0;
+        (*stats)["kept"] = double(returned);
+        if (max_candidates <= 0) return results;    // heuristic only: the pre-cache behaviour
+
+        std::set<std::string> seen;
+        auto fingerprint = [](const cublasLtMatmulAlgo_t& al) {
+            std::string s;
+            for (const auto& kv : read_cfg(al)) s += std::to_string(int(kv.second)) + ",";
+            return s;
+        };
+        for (const auto& r : results)
+            if (r.state == CUBLAS_STATUS_SUCCESS) seen.insert(fingerprint(r.algo));
+
+        int ids[64];
+        int n_ids = 0;
+        if (cublasLtMatmulAlgoGetIds(lt_, CUBLAS_COMPUTE_32F, CUDA_R_32F, a_type_, b_type_,
+                                     d_type_, d_type_, 64, ids, &n_ids) != CUBLAS_STATUS_SUCCESS)
+            return results;
+        (*stats)["ids"] = double(n_ids);
+
+        // Candidates per algo id, kept separate so the cap can round-robin rather than let one
+        // id that exposes hundreds of tiles starve the rest.
+        std::vector<std::vector<cublasLtMatmulHeuristicResult_t>> per_id(n_ids);
+        int64_t enumerated = 0, checked = 0;
+
+        for (int idx = 0; idx < n_ids; ++idx) {
+            cublasLtMatmulAlgo_t tmpl{};
+            // Most ids do not support this fp8 dtype pair at all; that is not an error.
+            if (cublasLtMatmulAlgoInit(lt_, CUBLAS_COMPUTE_32F, CUDA_R_32F, a_type_, b_type_,
+                                       d_type_, d_type_, ids[idx], &tmpl) != CUBLAS_STATUS_SUCCESS)
+                continue;
+
+            auto tiles = cap_list(tmpl, CUBLASLT_ALGO_CAP_TILE_IDS, CUBLASLT_MATMUL_TILE_UNDEFINED);
+            auto stages = cap_list(tmpl, CUBLASLT_ALGO_CAP_STAGES_IDS,
+                                   CUBLASLT_MATMUL_STAGES_UNDEFINED);
+            const int splitk_support = cap_int(tmpl, CUBLASLT_ALGO_CAP_SPLITK_SUPPORT, 0);
+            const int red_mask = cap_int(tmpl, CUBLASLT_ALGO_CAP_REDUCTION_SCHEME_MASK,
+                                         int(CUBLASLT_REDUCTION_SCHEME_NONE));
+            const int swz_support = cap_int(tmpl, CUBLASLT_ALGO_CAP_CTA_SWIZZLING_SUPPORT, 0);
+            const int custom_max = cap_int(tmpl, CUBLASLT_ALGO_CAP_CUSTOM_OPTION_MAX, 0);
+
+            // A splitK ladder, not every integer: a split that leaves fewer than 128 rows of k
+            // per chunk is never the winner and enumerating it is pure screening cost.
+            std::vector<int> splits{1};
+            if (splitk_support) {
+                for (int s : {2, 3, 4, 5, 6, 8, 12, 16, 32})
+                    if (k_ / s >= 128) splits.push_back(s);
+            }
+            std::vector<int> swizzles{0};
+            if (swz_support) swizzles.push_back(1);
+            const int customs = std::min(custom_max, kCustomCap);
+
+            for (int tile : tiles)
+            for (int stage : stages)
+            for (int split : splits)
+            for (int red : {int(CUBLASLT_REDUCTION_SCHEME_NONE),
+                            int(CUBLASLT_REDUCTION_SCHEME_INPLACE),
+                            int(CUBLASLT_REDUCTION_SCHEME_COMPUTE_TYPE),
+                            int(CUBLASLT_REDUCTION_SCHEME_OUTPUT_TYPE)})
+            for (int swz : swizzles)
+            for (int cust = 0; cust <= customs; ++cust) {
+                // Reduction only means anything when the work is actually split.
+                if (split == 1 && red != int(CUBLASLT_REDUCTION_SCHEME_NONE)) continue;
+                if (split > 1 && !(red_mask & red)) continue;
+                ++enumerated;
+
+                cublasLtMatmulAlgo_t algo = tmpl;
+                if (set_cfg(algo, CUBLASLT_ALGO_CONFIG_TILE_ID, tile) != CUBLAS_STATUS_SUCCESS)
+                    continue;
+                if (set_cfg(algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, stage) != CUBLAS_STATUS_SUCCESS)
+                    continue;
+                if (set_cfg(algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, split) != CUBLAS_STATUS_SUCCESS)
+                    continue;
+                if (set_cfg(algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, red)
+                    != CUBLAS_STATUS_SUCCESS)
+                    continue;
+                if (set_cfg(algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, swz)
+                    != CUBLAS_STATUS_SUCCESS)
+                    continue;
+                if (set_cfg(algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, cust)
+                    != CUBLAS_STATUS_SUCCESS)
+                    continue;
+
+                cublasLtMatmulHeuristicResult_t check{};
+                ++checked;
+                if (cublasLtMatmulAlgoCheck(lt_, desc_, Adesc_, Bdesc_, Ddesc_, Ddesc_, &algo,
+                                            &check) != CUBLAS_STATUS_SUCCESS)
+                    continue;
+                if (check.workspaceSize > workspace_bytes()) continue;
+                if (!seen.insert(fingerprint(algo)).second) continue;   // already a seed
+                check.algo = algo;
+                check.state = CUBLAS_STATUS_SUCCESS;
+                per_id[idx].push_back(check);
+            }
+        }
+
+        // Round-robin the cap across ids, in canonical order within each, so truncation is
+        // reproducible run to run.
+        int64_t budget = max_candidates - int64_t(results.size());
+        for (size_t depth = 0; budget > 0; ++depth) {
+            bool any = false;
+            for (int idx = 0; idx < n_ids && budget > 0; ++idx) {
+                if (depth >= per_id[idx].size()) continue;
+                results.push_back(per_id[idx][depth]);
+                --budget;
+                any = true;
+            }
+            if (!any) break;
+        }
+
+        (*stats)["enumerated"] = double(enumerated);
+        (*stats)["checked"] = double(checked);
+        (*stats)["kept"] = double(results.size());
+        return results;
+    }
+
     void check_operands(const torch::Tensor& a, const torch::Tensor& b) const {
         TORCH_CHECK(a.is_cuda() && b.is_cuda(), "operands must be CUDA tensors");
         if (nt_) {
@@ -303,10 +591,15 @@ private:
         return double(ms) * 1000.0 / double(iters);
     }
 
+    // Custom option is an opaque per-algorithm dial with no semantics we can reason about, so
+    // sample the low end rather than trusting whatever CUSTOM_OPTION_MAX claims.
+    static constexpr int kCustomCap = 4;
+
     int64_t m_, n_, k_;
     bool accum_ = false;
     bool nt_ = false;
     bool pinned_ = false;
+    cudaDataType_t a_type_, b_type_, d_type_;
     cublasLtHandle_t lt_ = nullptr;
     cublasLtMatmulDesc_t desc_ = nullptr;
     cublasLtMatrixLayout_t Adesc_ = nullptr, Bdesc_ = nullptr, Ddesc_ = nullptr;
@@ -320,7 +613,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              pybind11::arg("m"), pybind11::arg("n"), pybind11::arg("k"), pybind11::arg("a_dtype"),
              pybind11::arg("b_dtype"), pybind11::arg("fast_accum"),
              pybind11::arg("accum") = false, pybind11::arg("nt") = false)
-        .def("autotune", &PinnedGemm::autotune)
+        // exhaustive_max_candidates defaults to 0, so the existing positional call site keeps
+        // the heuristic-only search it has always had.
+        .def("autotune", &PinnedGemm::autotune,
+             pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("a_scale"),
+             pybind11::arg("b_scale"), pybind11::arg("max_algos"), pybind11::arg("iters"),
+             pybind11::arg("finalists"), pybind11::arg("rounds"),
+             pybind11::arg("exhaustive_max_candidates") = 0)
+        .def("restore", &PinnedGemm::restore,
+             pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("a_scale"),
+             pybind11::arg("b_scale"), pybind11::arg("cfg"))
+        .def("config", &PinnedGemm::config)
+        .def("time", &PinnedGemm::time,
+             pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("a_scale"),
+             pybind11::arg("b_scale"), pybind11::arg("iters"))
         .def("run", &PinnedGemm::run)
         .def("run_accum", &PinnedGemm::run_accum);
+    // The *runtime* cuBLASLt, not the CUBLAS_VERSION macro: this extension links the toolkit's
+    // libcublasLt rather than torch's, and it is the loaded .so whose algo ids the cache keys on.
+    m.def("cublaslt_version", [] { return int64_t(cublasLtGetVersion()); });
 }
