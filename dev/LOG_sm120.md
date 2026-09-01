@@ -52,3 +52,12 @@ forward, not 100 steps of training dynamics, so it does not replace the bpb batt
 The corridor has two walls and only one is guarded: too low and block scales clip at 448 (the
 search handles it), too high and they flush to e4m3 zero, silently zeroing a whole group of 16.
 The knee is ~256x, so the seed is 100 here rather than fp8's 1e3, which sits at it.
+
+2026-09-01 hold the RHT sign pattern across the grad-accum window (--nvfp4-hold-rht), queue B3
+Off by default, unmeasured. rerotate_hadamard moves from every backward into refresh_weight_cache,
+which now also caches rht128_requant(w) under the held rotation -- so the weight's backward
+requant (1,936 launches/step, ~half the 104 ms requant row) runs once per optimizer step. Needs
+--nvfp4-weight-cache. Python-only: three more saved tensors through _NVFP4Matmul, no CUDA touched.
+Estimator change: one EDEN draw of the weight per window instead of one per micro-step; the
+activation requant and both gradient quantizes still draw fresh seeds every backward. Gate is a
+16-run battery against plain --nvfp4 plus an arm_batch A/B/A -- neither run yet. 5 new tests.

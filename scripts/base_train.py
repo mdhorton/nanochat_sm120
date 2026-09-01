@@ -51,6 +51,7 @@ parser.add_argument("--fp8", action="store_true", help="enable FP8 training (req
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
 parser.add_argument("--nvfp4", action="store_true", help="enable NVFP4 training via the Quartet-II kernels (requires Blackwell sm_100+; mutually exclusive with --fp8)")
 parser.add_argument("--nvfp4-rne", action="store_true", help="ABLATION: use plain round-to-nearest for the NVFP4 forward instead of Quartet-II's 4/6 rounding. Not part of the stack below -- it takes accuracy away, so --nvfp4 does not turn it on")
+parser.add_argument("--nvfp4-hold-rht", action="store_true", help="EXPERIMENTAL, unmeasured: hold the NVFP4 backward's random Hadamard sign pattern across the grad-accum window (re-drawn once per optimizer step) so the weight's backward requant is cached with the weight cache. Changes the gradient estimator; needs --nvfp4-weight-cache (dev/nvfp4-quartet.md, B3)")
 # The four below are the measured NVFP4 stack and --nvfp4 turns all of them on; each takes a
 # --no- form to put back. default=None means "not asked for either way", which is what lets an
 # explicit flag without --nvfp4 still be an error instead of a silent no-op.
@@ -218,6 +219,8 @@ else:
     orphans = [n for n, v in nvfp4_asked.items() if v is not None]
     if args.nvfp4_rne:
         orphans.append("nvfp4_rne")
+    if args.nvfp4_hold_rht:
+        orphans.append("nvfp4_hold_rht")
     if args.nvfp4_scaling != "dynamic":
         raise ValueError(f"--nvfp4-scaling {args.nvfp4_scaling} needs --nvfp4")
     if orphans:
@@ -237,6 +240,11 @@ if args.nvfp4:
         # RNE scales a group at the tensor amax onto e4m3's max exactly, so a saturated block
         # scale is indistinguishable from a correctly scaled one and the search cannot work.
         raise ValueError("--nvfp4-scaling delayed needs 4/6 rounding; drop --nvfp4-rne")
+    if args.nvfp4_hold_rht and not args.nvfp4_weight_cache:
+        # The held requant is refreshed inside the weight-cache refresh, from the cached
+        # forward quantization, so there is nothing to hang it on without the cache.
+        raise ValueError("--nvfp4-hold-rht needs --nvfp4-weight-cache: the held weight requant "
+                         "is refreshed with it")
     if device_type != "cuda":
         print0("Warning: NVFP4 training requires CUDA, ignoring --nvfp4 flag")
     else:
@@ -262,6 +270,10 @@ if args.nvfp4:
             from nanochat.sm120.nvfp4 import refresh_weight_caches as refresh_nvfp4_weight_caches
             nvfp4_weight_cache = True
             print0(f"  weight cache on for {enable_weight_caches(model)} layers (refreshed once per optimizer step)")
+        if args.nvfp4_hold_rht:
+            from nanochat.sm120.nvfp4 import enable_rht_hold
+            print0(f"  RHT sign pattern held across the grad-accum window; backward weight "
+                   f"requant cached for {enable_rht_hold(model)} layers (EXPERIMENTAL, unmeasured)")
         if args.nvfp4_lt_gemm:
             from nanochat.sm120 import fp4_gemm
             # Built here, not on first use: the launcher is on by default now, so a toolchain

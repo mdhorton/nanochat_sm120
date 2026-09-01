@@ -35,6 +35,7 @@ from nanochat.sm120.nvfp4 import (  # noqa: E402
     NVFP4Linear,
     convert_to_nvfp4_training,
     dequantize,
+    enable_rht_hold,
     enable_weight_caches,
     enable_wgrad_accum,
     fp4_mm,
@@ -377,6 +378,69 @@ class TestWeightCache:
     def test_cache_buffers_stay_out_of_checkpoints(self):
         _, cached = self._pair()
         keys = cached.state_dict().keys()
+        assert not any(k.startswith("fp4_") for k in keys), keys
+
+
+class TestRhtHold:
+    """--nvfp4-hold-rht: one rotation and one weight requant per optimizer step, not per backward.
+
+    What is checked here is the mechanism -- that the cache holds exactly what the backward would
+    otherwise recompute, that it is held for the window and re-drawn on refresh -- not the
+    estimator's quality, which only a bpb battery can speak to.
+    """
+
+    @staticmethod
+    def _held():
+        torch.manual_seed(0)
+        mod = NVFP4Linear(256, 384, bias=False, device="cuda", dtype=torch.float32)
+        enable_weight_caches(mod)
+        enable_rht_hold(mod)
+        return mod
+
+    def test_needs_the_weight_cache(self):
+        mod = NVFP4Linear(256, 384, bias=False, device="cuda", dtype=torch.float32)
+        with pytest.raises(ValueError, match="weight cache"):
+            enable_rht_hold(mod)
+
+    def test_cache_is_the_requant_under_the_held_rotation(self):
+        """Reproduce the refresh by hand from the same RNG state: the held Hadamard and the cached
+        requant must be bit-identical to rerotate + rht128_requant of the cached forward weight."""
+        mod = self._held()
+        torch.manual_seed(1)
+        refresh_weight_caches(mod)
+        torch.manual_seed(1)
+        had = rerotate_hadamard(mod.had)                       # cuda RNG draw, same order
+        wt = rht128_requant(x=mod.fp4_w, x_group_scales=mod.fp4_ws, x_tensor_scale=mod.fp4_wg,
+                            h=had[:16, :], scale_override=BACKWARD_SCALE_OVERRIDE,
+                            scratch_amax=mod.scratch_amax)      # cpu RNG draw for the EDEN seed
+        assert torch.equal(mod.fp4_had, had)
+        assert torch.equal(mod.fp4_wt, wt.fp4)
+        assert torch.equal(mod.fp4_wts.view(torch.uint8), wt.micro_scales.view(torch.uint8))
+        assert torch.equal(mod.fp4_wtg, wt.tensor_scale)
+
+    def test_rotation_is_held_for_the_window_and_redrawn_on_refresh(self):
+        mod = self._held()
+        had0, wt0 = mod.fp4_had.clone(), mod.fp4_wt.clone()
+        for _ in range(3):                                      # three micro-steps, no refresh
+            x = torch.randn(512, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            mod(x).sum().backward()
+        assert torch.equal(mod.fp4_had, had0)
+        assert torch.equal(mod.fp4_wt, wt0)
+        refresh_weight_caches(mod)                              # the optimizer-step boundary
+        assert not torch.equal(mod.fp4_had, had0)
+        assert not torch.equal(mod.fp4_wt, wt0)
+
+    def test_backward_still_flows(self):
+        mod = self._held()
+        x = torch.randn(512, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        mod(x).sum().backward()
+        assert x.grad is not None and torch.isfinite(x.grad).all()
+        assert mod.weight.grad is not None and torch.isfinite(mod.weight.grad).all()
+
+    def test_held_buffers_stay_out_of_checkpoints(self):
+        mod = self._held()
+        assert mod.fp4_had is not None and mod.fp4_wt is not None
+        keys = mod.state_dict().keys()
         assert not any(k.startswith("fp4_") for k in keys), keys
 
 

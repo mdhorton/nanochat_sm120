@@ -40,6 +40,7 @@ from nanochat.common import COMPUTE_DTYPE
 from nanochat.gpt import Linear as _NanochatLinear
 from nanochat.sm120 import fp4_gemm, nvfp4_state
 from nanochat.sm120.quartet.quant import (
+    NVFP4Quant,
     NVFP4QuantMode,
     new_seed,
     quant_fp4,
@@ -131,11 +132,15 @@ class _NVFP4Matmul(torch.autograd.Function):
     `save_for_backward` like the weight cache, and mutated in the backward that unpacked it;
     both are safe only because the store is zeroed after `optimizer.step()` and never between
     a forward and its backward.
+
+    With `wt_fp4`/`wt_ms`/`wt_ts` (--nvfp4-hold-rht) `had` is the rotation already held for
+    this optimizer step and the trio is the weight requantized under it, so the backward reuses
+    both instead of drawing a fresh sign pattern and requantizing the weight per micro-step.
     """
 
     @staticmethod
-    def forward(ctx, x, weight, w_fp4, w_ms, w_ts, had, scratch_amax, main_grad, mode,
-                disable_backward_quant, scale_state=None):
+    def forward(ctx, x, weight, w_fp4, w_ms, w_ts, wt_fp4, wt_ms, wt_ts, had, scratch_amax,
+                main_grad, mode, disable_backward_quant, scale_state=None):
         assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
 
         # --nvfp4-scaling delayed: the activation's amax comes from a history, so the
@@ -152,13 +157,14 @@ class _NVFP4Matmul(torch.autograd.Function):
         # unless `main_grad` took it, in which case that slot returns None.
 
         ctx.save_for_backward(xq.fp4, xq.micro_scales, xq.tensor_scale,
-                              w_fp4, w_ms, w_ts, had, scratch_amax, main_grad)
+                              w_fp4, w_ms, w_ts, wt_fp4, wt_ms, wt_ts, had, scratch_amax,
+                              main_grad)
         ctx.disable_backward_quant = disable_backward_quant
         return fp4_mm(xq.fp4, w_fp4, xq.micro_scales, w_ms, xq.tensor_scale * w_ts)
 
     @staticmethod
     def backward(ctx, grad_output):
-        (x_fp4, x_ms, x_ts, w_fp4, w_ms, w_ts, had, scratch_amax,
+        (x_fp4, x_ms, x_ts, w_fp4, w_ms, w_ts, wt_fp4, wt_ms, wt_ts, had, scratch_amax,
          main_grad) = ctx.saved_tensors
         grad_output = grad_output.to(torch.bfloat16).contiguous()
 
@@ -172,18 +178,24 @@ class _NVFP4Matmul(torch.autograd.Function):
                 main_grad.add_(grad_weight.float())
                 grad_weight = None
             return (grad_output @ wr, grad_weight,
-                    None, None, None, None, None, None, None, None, None)
+                    None, None, None, None, None, None, None, None, None, None, None, None)
 
-        # A fresh sign pattern per backward: the Hadamard is a fixed rotation, the randomness is
-        # what keeps outliers from landing in the same group twice.
-        had = rerotate_hadamard(had)
-        h16 = had[:16, :]  # the kernels regenerate the rest by Sylvester's construction
         so = BACKWARD_SCALE_OVERRIDE
+        if wt_fp4 is None:
+            # A fresh sign pattern per backward: the Hadamard is a fixed rotation, the
+            # randomness is what keeps outliers from landing in the same group twice.
+            had = rerotate_hadamard(had)
+        # else: --nvfp4-hold-rht -- `had` was rotated once for this optimizer step and the
+        # weight requantized under it at refresh time; every micro-step shares both.
+        h16 = had[:16, :]  # the kernels regenerate the rest by Sylvester's construction
 
         # dgrad = E @ W, both operands rotated and requantized
         e_ht = rht128_quant_eden(x=grad_output, h=h16, scale_override=so, scratch_amax=scratch_amax)
-        wt_ht = rht128_requant(x=w_fp4, x_group_scales=w_ms, x_tensor_scale=w_ts, h=h16,
-                               scale_override=so, scratch_amax=scratch_amax)
+        if wt_fp4 is None:
+            wt_ht = rht128_requant(x=w_fp4, x_group_scales=w_ms, x_tensor_scale=w_ts, h=h16,
+                                   scale_override=so, scratch_amax=scratch_amax)
+        else:
+            wt_ht = NVFP4Quant(wt_fp4, wt_ms, wt_ts)
         grad_input = fp4_mm(e_ht.fp4, wt_ht.fp4, e_ht.micro_scales, wt_ht.micro_scales,
                             e_ht.tensor_scale * wt_ht.tensor_scale)
 
@@ -205,7 +217,8 @@ class _NVFP4Matmul(torch.autograd.Function):
             grad_weight = fp4_mm(et_ht.fp4, xt_ht.fp4, et_ht.micro_scales, xt_ht.micro_scales,
                                  alpha)
 
-        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None
+        return (grad_input, grad_weight,
+                None, None, None, None, None, None, None, None, None, None, None, None)
 
 
 class NVFP4Linear(_NanochatLinear):
@@ -233,6 +246,11 @@ class NVFP4Linear(_NanochatLinear):
         # The forward weight-quantization cache, filled by refresh_weight_cache(). While these
         # are None the forward quantizes the weight itself, so an unmanaged module still works.
         for name in ("fp4_w", "fp4_ws", "fp4_wg"):
+            self.register_buffer(name, None, persistent=False)
+        # --nvfp4-hold-rht: the rotation held for this optimizer step and the weight
+        # requantized under it, filled by refresh_weight_cache() while hold_rht is set.
+        self.hold_rht = False
+        for name in ("fp4_had", "fp4_wt", "fp4_wts", "fp4_wtg"):
             self.register_buffer(name, None, persistent=False)
         # Views into the model-wide DelayedScaleState (--nvfp4-scaling delayed). Registered
         # here rather than assigned later for the same reason as the cache above: a scale has
@@ -264,9 +282,11 @@ class NVFP4Linear(_NanochatLinear):
         writes into them in place, so it must run after every backward that consumed them --
         i.e. after `optimizer.step()`, never between a forward and its backward.
 
-        Only the *forward* weight quantization is cacheable. The backward's `rht128_requant(w)`
-        is not: it consumes a Hadamard that `rerotate_hadamard` re-randomizes every backward,
-        which is the estimator working as intended.
+        Only the *forward* weight quantization is cacheable by default. The backward's
+        `rht128_requant(w)` is not: it consumes a Hadamard that `rerotate_hadamard` re-randomizes
+        every backward, which is the estimator working as intended. `hold_rht` changes that
+        trade: the rotation is drawn here, once per optimizer step, and the requant cached with
+        it -- one EDEN draw of the weight per grad-accum window instead of one per micro-step.
         """
         wq = quant_fp4(self.weight.detach().to(torch.bfloat16),
                        scale_override=FORWARD_SCALE_OVERRIDE, mode=self.mode)
@@ -278,6 +298,21 @@ class NVFP4Linear(_NanochatLinear):
         self.fp4_w.copy_(wq.fp4)
         self.fp4_ws.copy_(wq.micro_scales)
         self.fp4_wg.copy_(wq.tensor_scale)
+        if not self.hold_rht:
+            return
+        if self.fp4_had is None:
+            self.fp4_had = torch.empty_like(self.had)
+        self.fp4_had.copy_(rerotate_hadamard(self.had))
+        wt = rht128_requant(x=self.fp4_w, x_group_scales=self.fp4_ws, x_tensor_scale=self.fp4_wg,
+                            h=self.fp4_had[:16, :], scale_override=BACKWARD_SCALE_OVERRIDE,
+                            scratch_amax=self.scratch_amax)
+        if self.fp4_wt is None:
+            self.fp4_wt = torch.empty_like(wt.fp4)
+            self.fp4_wts = torch.empty_like(wt.micro_scales)
+            self.fp4_wtg = torch.empty_like(wt.tensor_scale)
+        self.fp4_wt.copy_(wt.fp4)
+        self.fp4_wts.copy_(wt.micro_scales)
+        self.fp4_wtg.copy_(wt.tensor_scale)
 
     def forward(self, x):
         x = x.to(COMPUTE_DTYPE)
@@ -290,9 +325,11 @@ class NVFP4Linear(_NanochatLinear):
         # eval or sampling pass through this module cannot poison it.
         scale_state = None if amax_in is None or not torch.is_grad_enabled() else (
             amax_in, self.fp4_amax_in)
+        had = self.fp4_had if self.hold_rht else self.had
         out = _NVFP4Matmul.apply(x_2d, self.weight.to(torch.bfloat16),
                                  self.fp4_w, self.fp4_ws, self.fp4_wg,
-                                 self.had, self.scratch_amax, self.fp4_main_grad,
+                                 self.fp4_wt, self.fp4_wts, self.fp4_wtg,
+                                 had, self.scratch_amax, self.fp4_main_grad,
                                  self.mode, self.disable_backward_quant, scale_state)
         if pad:
             out = out[: x_2d.shape[0] - pad]
@@ -390,6 +427,24 @@ def enable_weight_caches(model):
     mods = [m for m in model.modules() if isinstance(m, NVFP4Linear)]
     for m in mods:
         m.weight_cache_enabled = True
+        m.refresh_weight_cache()
+    return len(mods)
+
+
+def enable_rht_hold(model):
+    """Hold the backward's RHT sign pattern across the grad-accum window (--nvfp4-hold-rht).
+
+    Re-randomized once per optimizer step inside `refresh_weight_cache()`, which also caches
+    `rht128_requant(w)` under it -- so this rides on the weight cache and requires it. Must run
+    before `torch.compile`: it registers the buffers the compiled backward reads. Returns the
+    count of modules converted (0 if none).
+    """
+    mods = [m for m in model.modules() if isinstance(m, NVFP4Linear)]
+    if any(not m.weight_cache_enabled for m in mods):
+        raise ValueError("holding the RHT across the window needs the weight cache "
+                         "(--nvfp4-weight-cache): the held requant is refreshed with it")
+    for m in mods:
+        m.hold_rht = True
         m.refresh_weight_cache()
     return len(mods)
 

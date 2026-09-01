@@ -118,6 +118,10 @@ Defend that with a `cublaslt_version()` print and a `< 130600` warning, not depe
   history, so its 6.9 ms/step over 5,808 launches collapses to a once-per-step multiply.
 - **A4 — QKV dedup.** `c_q`/`c_k`/`c_v` quantize the same `x`, so they now also carry three
   identical histories and run three identical readback reductions. A4 collapses all of it.
+- **B3 — built 2026-09-01 as `--nvfp4-hold-rht`, off by default, unmeasured.** Needs a
+  throughput A/B/A and a 16-run bpb battery against plain `--nvfp4` (d12/dbs 8/2 GPU/100
+  steps) before it can join the default stack. B1 is in the same state: both are the pending
+  batteries.
 
 Not done, and worth a line: `DelayedScaleState` has a `saturated`/`headroom` counter's worth of
 information in `update()`'s `raw >= self.max` mask but does not expose it. Surfacing it would turn
