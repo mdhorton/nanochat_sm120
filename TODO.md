@@ -57,7 +57,7 @@ when the NT wgrad is on but no plans were built. `report_once` gates on
 `fp8_pinned.wgrad_nt()`, not on the flag, so `--wgrad-nt` without `--fp8` warns once and stays
 quiet.
 
-Measured here, d12/dbs 8/2 GPU, `--fp8 --fp8-scaling delayed` + `NANOCHAT_FA2_WINDOWED_FLASH=1`,
+Measured here, d12/dbs 8/2 GPU, `--fp8 --fp8-scaling delayed` + `NANOCHAT_FA2_SWINDOW=1`,
 one `arm_batch.sh` batch: **205,028 → 228,734 tok/s (+11.6%)**, peak 9,654 → 10,640 MiB
 (+986 MiB, against the donor's +1,680 at d16), bpb 1.665911 → 1.663725. The NT arm started 10 °C
 hotter than the baseline, so the gain is if anything understated. The four plan lines all report

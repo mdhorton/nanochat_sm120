@@ -85,7 +85,7 @@ base flag: none
 |---------:|-------:|---------:|-------------------------------|
 |     197k |    9.6 | 1.672274 |                               |                   
 |     275k |    9.6 | 1.682605 | --window-pattern L            |                   
-|     286k |    9.6 | 1.672474 | NANOCHAT_FA2_WINDOWED_FLASH=1 |      
+|     286k |    9.6 | 1.672474 | NANOCHAT_FA2_SWINDOW=1 |      
 
 #### 2x RTX Pro 4000
 
@@ -93,7 +93,7 @@ base flag: none
 |---------:|-------:|---------:|-------------------------------|
 |     112k |   10.2 | 1.676620 |                               |                   
 |     165k |   10.2 | 1.686013 | --window-pattern L            |                   
-|     172k |   10.2 | 1.676444 | NANOCHAT_FA2_WINDOWED_FLASH=1 |                   
+|     172k |   10.2 | 1.676444 | NANOCHAT_FA2_SWINDOW=1 |                   
 
 ### training precision: fp8
 
@@ -105,9 +105,9 @@ base flag: --fp8
 |---------:|-------:|---------:|----------------------------------------------------------------|
 |     208k |   10.9 | 1.677617 |                                                                |                   
 |     302k |   10.8 | 1.687429 | --window-pattern L                                             |  
-|     316k |   10.8 | 1.677830 | NANOCHAT_FA2_WINDOWED_FLASH=1                                  |                   
-|     328k |    9.1 | 1.668514 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed            |                   
-|     362k |   10.1 | 1.661808 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed --wgrad-nt |     
+|     316k |   10.8 | 1.677830 | NANOCHAT_FA2_SWINDOW=1                                  |                   
+|     328k |    9.1 | 1.668514 | NANOCHAT_FA2_SWINDOW=1 --fp8-scaling delayed            |                   
+|     362k |   10.1 | 1.661808 | NANOCHAT_FA2_SWINDOW=1 --fp8-scaling delayed --wgrad-nt |     
 
 #### 2x RTX Pro 4000
 
@@ -115,9 +115,9 @@ base flag: --fp8
 |---------:|-------:|---------:|----------------------------------------------------------------|
 |     120k |   11.4 | 1.676669 |                                                                |                   
 |     185k |   11.4 | 1.686771 | --window-pattern L                                             |  
-|     195k |   11.4 | 1.675813 | NANOCHAT_FA2_WINDOWED_FLASH=1                                  |                   
-|     204k |    9.7 | 1.662816 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed            |                   
-|     229k |   10.6 | 1.662855 | NANOCHAT_FA2_WINDOWED_FLASH=1 --fp8-scaling delayed --wgrad-nt |                   
+|     195k |   11.4 | 1.675813 | NANOCHAT_FA2_SWINDOW=1                                  |                   
+|     204k |    9.7 | 1.662816 | NANOCHAT_FA2_SWINDOW=1 --fp8-scaling delayed            |                   
+|     229k |   10.6 | 1.662855 | NANOCHAT_FA2_SWINDOW=1 --fp8-scaling delayed --wgrad-nt |                   
 
 #### training precision: nvfp4
 
@@ -129,8 +129,8 @@ base flag: --nvfp4
 |---------:|-------:|---------:|-------------------------------------------------------|
 |     231k |   14.0 | 1.683095 |                                                       |                                          
 |     351k |   14.0 | 1.692907 | --window-pattern L                                    |                                          
-|     367k |   14.0 | 1.682989 | NANOCHAT_FA2_WINDOWED_FLASH=1                         |  
-|     370k |   14.0 | 1.683293 | NANOCHAT_FA2_WINDOWED_FLASH=1 --nvfp4-scaling delayed |    
+|     367k |   14.0 | 1.682989 | NANOCHAT_FA2_SWINDOW=1                         |  
+|     370k |   14.0 | 1.683293 | NANOCHAT_FA2_SWINDOW=1 --nvfp4-scaling delayed |    
 
 #### 2x RTX Pro 4000
 
@@ -138,14 +138,14 @@ base flag: --nvfp4
 |---------:|-------:|---------:|-------------------------------------------------------|
 |     135k |   14.0 | 1.681464 |                                                       |                                          
 |     220k |   14.0 | 1.691275 | --window-pattern L                                    |                                          
-|     233k |   14.0 | 1.681451 | NANOCHAT_FA2_WINDOWED_FLASH=1                         |  
-|     236k |   14.0 | 1.682219 | NANOCHAT_FA2_WINDOWED_FLASH=1 --nvfp4-scaling delayed |
+|     233k |   14.0 | 1.681451 | NANOCHAT_FA2_SWINDOW=1                         |  
+|     236k |   14.0 | 1.682219 | NANOCHAT_FA2_SWINDOW=1 --nvfp4-scaling delayed |
 
 ## Accepted
 
 ### FA2 sliding-window kernels
 
-NANOCHAT_FA2_WINDOWED_FLASH=1
+NANOCHAT_FA2_SWINDOW=1
 
 This addition is mostly just wiring code so that existing FA2 kernels are used for sliding-windows.
 
@@ -160,16 +160,20 @@ paths that take no flags. This is an acceptable trade off given that the purpose
 
 ### FlexAttention
 
+This was the first attempt to fix the sliding-window problem.
+
 https://pytorch.org/blog/flexattention/
 
 branch: flex-attention
 
-| toks/sec | mem GB |      bpb | flags                  | 
-|---------:|-------:|---------:|------------------------|
-|     187k |   11.4 | 1.675918 | --fp8 --attn-impl flex |
+result: Less than 1% toks/sec improvement but had minor bpb improvement. NANOCHAT_FA2_SWINDOW=1 improved toks/sec
+significantly more while also improving bpb.
 
-Less than 1% toks/sec improvement. It did improve bpb. However, NANOCHAT_FA2_WINDOWED_FLASH=1 improved toks/sec
-significantly more while at the same time matching flex attention's bpb improvment.
+### Exhaustive optimal gemm search
+
+branch: exhaustive-search
+
+result: Increased startup time and code complexity with near zero performance improvement.
 
 ## License
 

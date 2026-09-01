@@ -15,7 +15,7 @@ export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 # Windowed flash attention is opt-in (nanochat/sm120/__init__.py); this is an sm120 recipe and the
 # --window-pattern default needs it to avoid falling back to a materialized SDPA mask.
-export NANOCHAT_FA2_WINDOWED_FLASH=1
+export NANOCHAT_FA2_SWINDOW=1
 mkdir -p $NANOCHAT_BASE_DIR
 
 # -----------------------------------------------------------------------------

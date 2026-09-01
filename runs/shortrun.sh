@@ -38,7 +38,7 @@ case "$SM_ARCH" in
 #    12.0) FLAGS+=(--nvfp4) ;;&
 #    12.0) FLAGS+=(--nvfp4-scaling delayed) ;;&
 #    12.0) FLAGS+=(--window-pattern L ) ;;&
-    12.0) export NANOCHAT_FA2_WINDOWED_FLASH=1 ;;&
+    12.0) export NANOCHAT_FA2_SWINDOW=1 ;;&
     *) ;;
 esac
 
