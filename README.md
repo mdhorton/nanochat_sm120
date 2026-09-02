@@ -76,8 +76,8 @@ toks/USD: 171M
 | GPUs               | toks/sec | mem GB |      bpb | USD/hour |
 |--------------------|---------:|-------:|---------:|---------:|
 | 2x RTX Pro 6000 WS |      130 |     57 | 1.328198 |     2.75 |
-| 4x RTX Pro 6000 WS |          |        |          |          |
-| 8x RTX Pro 6000 WS |      248 |     53 | 1.324561 |    10.00 |
+| 4x RTX Pro 6000 WS |          |        |          |     5.50 |
+| 8x RTX Pro 6000 WS |      248 |     53 | 1.324561 |    11.00 |
 
 ### 2x RTX Pro 6000 WS
 
@@ -168,24 +168,26 @@ base flag: --nvfp4
 
 NANOCHAT_FA2_SWINDOW=1
 
-This addition is mostly wiring code so that existing FA2 kernels are used for sliding-windows.
+This addition is mostly wiring added so that existing FA2 kernels are used for sliding-windows.
 
 FA3 has no sm120 kernels, so the `SSSL` sliding-window default uses an explicit SDPA mask, which is slow. The
 `--window-pattern L` option helps but it's limited. This new option allows it to use FA2 kernels for the S layers
 instead of SDPA masking.
 
-The switch is an environment variable rather than a flag because it has to reach every entry point, including the eval
+The option is an environment variable rather than a flag because it has to reach every entry point, including the eval
 paths that take no flags. This is an acceptable trade off given the purpose of this repo is to explore and learn.
 
 ## Rejected
 
 ### NVFP4 training
 
+The goal was to use nvfp4 precision to boost training speed.
+
 https://github.com/IST-DASLab/Quartet-II
 
-result: I was hoping nvfp4 would help boost training performance more. The end result was around 10% faster training vs
-fp8. Not a bad result, but it introduces quantization noise. The net result is that fp8 produces a slightly better
-quality model. The 10% speed gain of nvfp4 doesn't pay off.
+result: nvfp4 increased training speed by ~10% vs fp8. Not a bad result, but it introduced quantization noise. fp8
+reached the same level of model quality faster than nvfp4 despite nvfp4's faster speed. nvfp4's 10% speed gain isn't
+enough to justfiy its use.
 
 ### FlexAttention
 
