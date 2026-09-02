@@ -38,7 +38,7 @@ import torch.nn.functional as F
 
 from nanochat.common import COMPUTE_DTYPE
 from nanochat.gpt import Linear as _NanochatLinear
-from nanochat.sm120 import fp4_gemm, nvfp4_state
+from nanochat.sm120 import fp4_gemm, nvfp4_numerics, nvfp4_state
 from nanochat.sm120.quartet.quant import (
     NVFP4QuantMode,
     new_seed,
@@ -135,7 +135,8 @@ class _NVFP4Matmul(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, w_fp4, w_ms, w_ts, had, scratch_amax, main_grad, mode,
-                disable_backward_quant, scale_state=None):
+                disable_backward_quant, scale_state=None, w_t=None, w_ts_t=None, rht="all",
+                bwd_source="fp4"):
         assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
 
         # --nvfp4-scaling delayed: the activation's amax comes from a history, so the
@@ -151,16 +152,26 @@ class _NVFP4Matmul(torch.autograd.Function):
         # `weight` is still an input because it is the slot backward returns grad_weight into --
         # unless `main_grad` took it, in which case that slot returns None.
 
+        # The numerics levers (nvfp4_numerics) decide what else the backward needs: the bf16
+        # weight and activation when it quantizes from source, the 2D transposed weight when
+        # dgrad shares the forward's quantization. Saved only when read, so the default path
+        # holds exactly what it always did.
+        needs_weight = bwd_source == "bf16" or rht != "all"
         ctx.save_for_backward(xq.fp4, xq.micro_scales, xq.tensor_scale,
-                              w_fp4, w_ms, w_ts, had, scratch_amax, main_grad)
+                              w_fp4, w_ms, w_ts, had, scratch_amax, main_grad,
+                              weight if needs_weight else None,
+                              x if bwd_source == "bf16" else None, w_t, w_ts_t)
         ctx.disable_backward_quant = disable_backward_quant
+        ctx.rht = rht
+        ctx.bwd_source = bwd_source
         return fp4_mm(xq.fp4, w_fp4, xq.micro_scales, w_ms, xq.tensor_scale * w_ts)
 
     @staticmethod
     def backward(ctx, grad_output):
         (x_fp4, x_ms, x_ts, w_fp4, w_ms, w_ts, had, scratch_amax,
-         main_grad) = ctx.saved_tensors
+         main_grad, weight, x_bf16, w_t, w_ts_t) = ctx.saved_tensors
         grad_output = grad_output.to(torch.bfloat16).contiguous()
+        nones = (None,) * 13
 
         if ctx.disable_backward_quant:
             # bf16 backward against the dequantized forward operands. For tests and ablations:
@@ -171,27 +182,27 @@ class _NVFP4Matmul(torch.autograd.Function):
             if main_grad is not None:
                 main_grad.add_(grad_weight.float())
                 grad_weight = None
-            return (grad_output @ wr, grad_weight,
-                    None, None, None, None, None, None, None, None, None)
+            return (grad_output @ wr, grad_weight) + nones
 
         # A fresh sign pattern per backward: the Hadamard is a fixed rotation, the randomness is
         # what keeps outliers from landing in the same group twice.
-        had = rerotate_hadamard(had)
+        if ctx.rht != "none":
+            had = rerotate_hadamard(had)
         h16 = had[:16, :]  # the kernels regenerate the rest by Sylvester's construction
         so = BACKWARD_SCALE_OVERRIDE
 
-        # dgrad = E @ W, both operands rotated and requantized
-        e_ht = rht128_quant_eden(x=grad_output, h=h16, scale_override=so, scratch_amax=scratch_amax)
-        wt_ht = rht128_requant(x=w_fp4, x_group_scales=w_ms, x_tensor_scale=w_ts, h=h16,
-                               scale_override=so, scratch_amax=scratch_amax)
+        # dgrad = E @ W. By default both operands are rotated and requantized from the saved
+        # fp4; --nvfp4-rht / --nvfp4-bwd-source / --nvfp4-weight-2d change the recipe there.
+        e_ht, wt_ht = nvfp4_numerics.dgrad_operands(
+            grad_output, weight, w_fp4, w_ms, w_ts, w_t, w_ts_t, h16, so, scratch_amax,
+            rht=ctx.rht, bwd_source=ctx.bwd_source)
         grad_input = fp4_mm(e_ht.fp4, wt_ht.fp4, e_ht.micro_scales, wt_ht.micro_scales,
                             e_ht.tensor_scale * wt_ht.tensor_scale)
 
         # wgrad = E.T @ X, likewise
-        et_ht = rht128_quant_eden(x=grad_output, h=h16, scale_override=so, transpose=True,
-                                  scratch_amax=scratch_amax)
-        xt_ht = rht128_requant(x=x_fp4, x_group_scales=x_ms, x_tensor_scale=x_ts, h=h16,
-                               scale_override=so, scratch_amax=scratch_amax)
+        et_ht, xt_ht = nvfp4_numerics.wgrad_operands(
+            grad_output, x_bf16, x_fp4, x_ms, x_ts, h16, so, scratch_amax,
+            rht=ctx.rht, bwd_source=ctx.bwd_source)
         alpha = et_ht.tensor_scale * xt_ht.tensor_scale
         if main_grad is not None:
             # Gradient accumulation inside the GEMM epilogue (WgradAccumStore): the contribution
@@ -205,7 +216,7 @@ class _NVFP4Matmul(torch.autograd.Function):
             grad_weight = fp4_mm(et_ht.fp4, xt_ht.fp4, et_ht.micro_scales, xt_ht.micro_scales,
                                  alpha)
 
-        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None
+        return (grad_input, grad_weight) + nones
 
 
 class NVFP4Linear(_NanochatLinear):
@@ -215,10 +226,13 @@ class NVFP4Linear(_NanochatLinear):
     multiples of 128 (`is_nvfp4_convertible`) -- the token dimension is padded as needed.
     """
 
-    def __init__(self, *args, four_over_six=True, disable_backward_quant=False, **kwargs):
+    def __init__(self, *args, four_over_six=True, disable_backward_quant=False, numerics=None,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.mode = NVFP4QuantMode.FOUR_SIX if four_over_six else NVFP4QuantMode.RNE
         self.disable_backward_quant = disable_backward_quant
+        # The numerics levers (nvfp4_numerics.NumericsConfig); frozen, so safe as an attribute.
+        self.numerics = (numerics or nvfp4_numerics.DEFAULT).validate()
         self.weight_cache_enabled = False
         # Buffers, not plain attributes: a Python-side tensor cache captures a FakeTensor on the
         # first trace and the next compile dies with "Mixing fake modes NYI". Non-persistent so
@@ -232,7 +246,9 @@ class NVFP4Linear(_NanochatLinear):
         )
         # The forward weight-quantization cache, filled by refresh_weight_cache(). While these
         # are None the forward quantizes the weight itself, so an unmanaged module still works.
-        for name in ("fp4_w", "fp4_ws", "fp4_wg"):
+        # fp4_wt / fp4_wts are the transposed form of a --nvfp4-weight-2d quantization, which
+        # dgrad consumes directly; None otherwise.
+        for name in ("fp4_w", "fp4_ws", "fp4_wg", "fp4_wt", "fp4_wts"):
             self.register_buffer(name, None, persistent=False)
         # Views into the model-wide DelayedScaleState (--nvfp4-scaling delayed). Registered
         # here rather than assigned later for the same reason as the cache above: a scale has
@@ -266,18 +282,31 @@ class NVFP4Linear(_NanochatLinear):
 
         Only the *forward* weight quantization is cacheable. The backward's `rht128_requant(w)`
         is not: it consumes a Hadamard that `rerotate_hadamard` re-randomizes every backward,
-        which is the estimator working as intended.
+        which is the estimator working as intended. With `--nvfp4-weight-2d` the dgrad reads the
+        cache too (its transposed form), so the ordering rule above covers the backward as well.
         """
-        wq = quant_fp4(self.weight.detach().to(torch.bfloat16),
-                       scale_override=FORWARD_SCALE_OVERRIDE, mode=self.mode)
+        w = self.weight.detach().to(torch.bfloat16)
+        if self.numerics.weight_2d:
+            fp4, ws, wg, fp4_t, wts = nvfp4_numerics.quantize_weight_2d(
+                w, four_over_six=self.mode is NVFP4QuantMode.FOUR_SIX,
+                scale_override=FORWARD_SCALE_OVERRIDE)
+        else:
+            fp4, ws, wg = quant_fp4(w, scale_override=FORWARD_SCALE_OVERRIDE, mode=self.mode)
+            fp4_t = wts = None
         if self.fp4_w is None:
             # First call: allocate. Buffers, not attributes -- see __init__.
-            self.fp4_w = torch.empty_like(wq.fp4)
-            self.fp4_ws = torch.empty_like(wq.micro_scales)
-            self.fp4_wg = torch.empty_like(wq.tensor_scale)
-        self.fp4_w.copy_(wq.fp4)
-        self.fp4_ws.copy_(wq.micro_scales)
-        self.fp4_wg.copy_(wq.tensor_scale)
+            self.fp4_w = torch.empty_like(fp4)
+            self.fp4_ws = torch.empty_like(ws)
+            self.fp4_wg = torch.empty_like(wg)
+            if fp4_t is not None:
+                self.fp4_wt = torch.empty_like(fp4_t)
+                self.fp4_wts = torch.empty_like(wts)
+        self.fp4_w.copy_(fp4)
+        self.fp4_ws.copy_(ws)
+        self.fp4_wg.copy_(wg)
+        if fp4_t is not None:
+            self.fp4_wt.copy_(fp4_t)
+            self.fp4_wts.copy_(wts)
 
     def forward(self, x):
         x = x.to(COMPUTE_DTYPE)
@@ -290,10 +319,14 @@ class NVFP4Linear(_NanochatLinear):
         # eval or sampling pass through this module cannot poison it.
         scale_state = None if amax_in is None or not torch.is_grad_enabled() else (
             amax_in, self.fp4_amax_in)
+        if self.numerics.weight_2d:
+            assert self.fp4_wt is not None, "--nvfp4-weight-2d needs the weight cache primed"
         out = _NVFP4Matmul.apply(x_2d, self.weight.to(torch.bfloat16),
                                  self.fp4_w, self.fp4_ws, self.fp4_wg,
                                  self.had, self.scratch_amax, self.fp4_main_grad,
-                                 self.mode, self.disable_backward_quant, scale_state)
+                                 self.mode, self.disable_backward_quant, scale_state,
+                                 self.fp4_wt, self.fp4_wts, self.numerics.rht,
+                                 self.numerics.bwd_source)
         if pad:
             out = out[: x_2d.shape[0] - pad]
         out = out.reshape(*orig_shape[:-1], out.shape[-1])
@@ -400,12 +433,13 @@ def is_nvfp4_convertible(mod):
 
 
 def convert_to_nvfp4_training(module, *, module_filter_fn=None, four_over_six=True,
-                              disable_backward_quant=False):
+                              disable_backward_quant=False, numerics=None):
     """Replace eligible nn.Linear layers with NVFP4Linear, in place. Returns the module.
 
     Mirrors `fp8.convert_to_float8_training`: post-order walk, weights and biases shared with
     the modules they replace. Layers whose features are not 128-aligned are left alone -- in
-    nanochat that is `ve_gate` and `smear_gate`, which are negligible in FLOPs.
+    nanochat that is `ve_gate` and `smear_gate`, which are negligible in FLOPs. `numerics` is
+    an `nvfp4_numerics.NumericsConfig`; its layer selection arrives as `module_filter_fn`.
     """
     def _convert(mod, prefix=""):
         for name, child in mod.named_children():
@@ -417,7 +451,7 @@ def convert_to_nvfp4_training(module, *, module_filter_fn=None, four_over_six=Tr
                 if module_filter_fn is None or module_filter_fn(child, fqn):
                     setattr(mod, name, NVFP4Linear.from_float(
                         child, four_over_six=four_over_six,
-                        disable_backward_quant=disable_backward_quant))
+                        disable_backward_quant=disable_backward_quant, numerics=numerics))
 
     _convert(module)
     return module

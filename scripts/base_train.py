@@ -36,6 +36,7 @@ from nanochat.flash_attention import HAS_FA3
 from nanochat import flash_attention
 import nanochat.sm120  # noqa: F401 -- importing it installs the windowed-flash fast path
 from nanochat.sm120 import recipe  # the sm120 performance stack; see nanochat/sm120/recipe.py
+from nanochat.sm120 import nvfp4_numerics  # the NVFP4 numerics levers; see nanochat/sm120/nvfp4_numerics.py
 from scripts.base_eval import evaluate_core
 print_banner()
 
@@ -218,6 +219,7 @@ else:
     orphans = [n for n, v in nvfp4_asked.items() if v is not None]
     if args.nvfp4_rne:
         orphans.append("nvfp4_rne")
+    orphans += nvfp4_numerics.orphan_flags(args)
     if args.nvfp4_scaling != "dynamic":
         raise ValueError(f"--nvfp4-scaling {args.nvfp4_scaling} needs --nvfp4")
     if orphans:
@@ -244,8 +246,13 @@ if args.nvfp4:
 
         from nanochat.sm120.nvfp4 import NVFP4Linear, convert_to_nvfp4_training, is_nvfp4_convertible
 
+        # The numerics levers (nanochat/sm120/nvfp4_numerics.py): layer selection goes in as the
+        # conversion filter, the rest rides on each NVFP4Linear.
+        numerics = nvfp4_numerics.from_args(args)
         num_linear = sum(1 for m in model.modules() if isinstance(m, nn.Linear))
-        convert_to_nvfp4_training(model, four_over_six=not args.nvfp4_rne)
+        convert_to_nvfp4_training(model, four_over_six=not args.nvfp4_rne,
+                                  module_filter_fn=nvfp4_numerics.module_filter(numerics, model.config.n_layer),
+                                  numerics=numerics)
         converted = [(n, m) for n, m in model.named_modules() if isinstance(m, NVFP4Linear)]
         skipped = [f"{n}{tuple(m.weight.shape)}" for n, m in model.named_modules()
                    if isinstance(m, nn.Linear) and not is_nvfp4_convertible(m)]
@@ -257,6 +264,12 @@ if args.nvfp4:
             # lm_head is on the list (padded_vocab_size not a multiple of 128) that is the
             # single biggest GEMM in the model sitting out.
             print0(f"  left in bf16 (features not 128-aligned): {', '.join(skipped)}")
+        if numerics.exclude_precision != "bf16":
+            # The excluded layers run as Float8Linear (tensorwise), or with an fp8 forward over
+            # the NVFP4 backward. Not --fp8: that flag converts the whole model and stays
+            # mutually exclusive with --nvfp4.
+            nvfp4_numerics.convert_excluded_to_fp8(model, numerics, model.config.n_layer)
+        print0("  " + nvfp4_numerics.describe(model, numerics))
         if args.nvfp4_weight_cache:
             from nanochat.sm120.nvfp4 import enable_weight_caches
             from nanochat.sm120.nvfp4 import refresh_weight_caches as refresh_nvfp4_weight_caches

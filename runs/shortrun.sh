@@ -22,8 +22,8 @@ fi
 FLAGS=(
     --depth $DEPTH
     --device-batch-size $DBS
-    --num-iterations 50
-    --eval-every 25
+    --num-iterations 100
+    --eval-every 50
     --eval-tokens 2097152
     --model-tag shortrun
     --core-metric-every -1
@@ -31,14 +31,15 @@ FLAGS=(
 )
 
 case "$SM_ARCH" in
-    9.0|10.0) FLAGS+=(--fp8) ;;
-    12.0) FLAGS+=(--fp8 ) ;;&
+    9.0) FLAGS+=(--fp8) ;;
+    10.0) FLAGS+=(--fp8) ;;
+#    12.0) FLAGS+=(--fp8 ) ;;&
 #    12.0) FLAGS+=(--fp8-scaling delayed) ;;&
 #    12.0) FLAGS+=(--wgrad-nt) ;;&
-#    12.0) FLAGS+=(--nvfp4) ;;&
+    12.0) FLAGS+=(--nvfp4) ;;&
 #    12.0) FLAGS+=(--nvfp4-scaling delayed) ;;&
 #    12.0) FLAGS+=(--window-pattern L ) ;;&
-#    12.0) export NANOCHAT_FA2_SWINDOW=1 ;;&
+    12.0) export NANOCHAT_FA2_SWINDOW=1 ;;&
     *) ;;
 esac
 

@@ -39,6 +39,8 @@ def add_args(parser):
                    help="run the weight-grad GEMMs in the natural (NT) operand layout, which sm120's cuBLASLt accepts, instead of building the transposed copies the TN form needs -- deletes the pure-copy fp8 transpose kernels, 4.6%% of a step: +8.4%% at d12. Needs --fp8, and JIT-builds csrc/pinned_gemm.cu on first use. Costs ~1.7 GB of peak memory")
     g.add_argument("--fp8-exclude", type=str, default="",
                    help="comma-separated Linear names to keep in bf16 under --fp8, matched against the last component of the module fqn (e.g. 'lm_head'). Each fp8 Linear costs an amax+cast+transpose pass over its activations; for a layer whose GEMM saving is small relative to that traffic, bf16 can win")
+    from nanochat.sm120 import nvfp4_numerics
+    nvfp4_numerics.add_args(g)   # --nvfp4-exclude, --nvfp4-bf16-blocks, --nvfp4-bwd-source, --nvfp4-rht, --nvfp4-weight-2d
     return g
 
 

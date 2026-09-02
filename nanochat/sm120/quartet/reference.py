@@ -19,14 +19,20 @@ _TIE_TO_UPPER = [False, True, False, True, False, True, False]
 E4M3_MAX = 448.0
 
 
-def round_e2m1(x):
-    """Round-to-nearest-even onto E2M1's grid. Returns dequantized magnitudes with sign."""
+def e2m1_codes(x):
+    """Round-to-nearest-even onto E2M1's grid, as 4-bit codes: magnitude index 0..7, sign in bit 3."""
     a = x.abs()
-    code = torch.zeros_like(a, dtype=torch.long)
+    code = torch.zeros_like(a, dtype=torch.uint8)
     for i, (m, tie_up) in enumerate(zip(_MIDPOINTS, _TIE_TO_UPPER)):
         code = torch.where(a > m if not tie_up else a >= m, torch.full_like(code, i + 1), code)
+    return torch.where(x < 0, code | 8, code)
+
+
+def round_e2m1(x):
+    """Round-to-nearest-even onto E2M1's grid. Returns dequantized magnitudes with sign."""
+    code = e2m1_codes(x).to(torch.long)
     levels = torch.tensor(E2M1_LEVELS, dtype=x.dtype, device=x.device)
-    return levels[code] * torch.where(x < 0, -1.0, 1.0).to(x.dtype)
+    return levels[code & 7] * torch.where(code & 8 != 0, -1.0, 1.0).to(x.dtype)
 
 
 def _quantize_with_divisor(x_groups, group_amax, tensor_scale, val_max):
