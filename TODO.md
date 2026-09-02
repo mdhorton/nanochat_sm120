@@ -153,3 +153,40 @@ Consequences:
 - The `--nvfp4` C1/C2 batteries were designed against the assumption that fp8 is the deterministic
   control arm. That assumption is weaker than recorded — worth re-reading those conclusions.
 - Suspect DDP/NCCL reduction order. Untested: whether a 1-GPU run is reproducible.
+
+## Comm/compute overlap for PCIe multi-GPU (design only, 2026-09-01)
+
+Context: RTX PRO 6000 boxes have no NVLink, only P2P over PCIe Gen5. Data parallel is the right
+architecture there (TP all-reduces activations per block; PP exists to fit models that fit
+anyway), so the only lever is hiding the per-step exchange. `MuonAdamW.step` already overlaps
+*within* the step (all reduces launched, then per-group wait/compute/gather), but nothing hides
+behind the backward that produces the grads or the forward that consumes the params. Exposed tax
+measured here: 1.3% fp8 / 1.9% nvfp4 on 2 Gen4 cards; grows ~linearly with card count at fixed
+total batch, and fp4's shorter step pays more.
+
+**Measure first.** One profile with NCCL kernels visible, to split the exchange into what the
+optimizer's own overlap already hides and what sits on the critical path. Only worth building at
+4+ cards.
+
+Two independent seams:
+
+- **Reduce-scatter during the last micro-step's backward.** Bucket by layer, not by shape: the
+  shape-stacked Muon groups only complete when block 0's backward finishes. Trigger: a full
+  backward hook on each `Block`, armed on the last micro-step only -- fires after the block's
+  whole backward, so it covers bf16, fp8 and the fused-wgrad accumulator alike. `step()` then
+  consumes per-layer futures instead of launching reduces.
+- **All-gather during the next step's forward.** Issue gathers in forward order; a pre-forward
+  hook on each block waits on its own future. The nvfp4 weight-cache refresh and the fp8 weight
+  cast read the gathered params, so they move into the same per-block hook.
+
+Costs and constraints:
+
+- `torch.compile` wraps the whole GPT; hooks that wait on futures inside it graph-break or need
+  compiled autograd. Compile per block, hooks in eager between blocks -- a `base_train.py` change.
+- The window is the last backward: ~4% of the step at grad-accum 16 (cannot hide an 8% tax),
+  ~a third at grad-accum 2-4, i.e. the large-dbs geometry 96 GB cards run. Payoff depends on
+  batch geometry, not just card count.
+- `WgradAccumStore.flat` must not be zeroed until every per-layer reduce has read its view.
+- Fewer bytes is the other lever, smaller than overlap: Linear weights (Muon) go across as fp32
+  both ways; embeddings are already bf16 (44% of d24 params). bf16 reduce-scatter of Muon grads
+  is close to what Newton-Schulz already sees; the bf16 all-gather is the delicate side.

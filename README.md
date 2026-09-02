@@ -4,17 +4,22 @@
 
 This fork explores sm120 GPU peformance with nanochat. Here are a few questions I was curious about:
 
-- How does sm120 training and inference performance compare with H100 (sm90)?
-- Can Blackwell specific features (eg, nvfp4) help close the gap?
-- How does rental cost compare bwtewen sm120 and sm90?
+1. How does sm120 training performance compare with H100 (sm90)?
+2. Can Blackwell specific features (eg, nvfp4) help close the gap?
+3. How does rental cost compare bwtewen sm120 and sm90?
 
-# TLDR; Conclusion
+# TL;DR conclusion
 
-TBD
+1. TBD
+2. nvfp4 speeds training ~10%, but the gain doesn't justify the hit to model quality. NVIDIA reports success with nvfp4
+   training. However, they trained 10 trillion tokens and had significantly better architecture. They were able to keep
+   quality in line with fp8. The effort required was justified by the large token count. A sm120 GPU would never see
+   this token count. The conclusion I draw is that sm120 nvfp4 is mostly for inference, not training.
+3. TBD
 
 ## Baseline
 
-Nanochat initially outputs the following when run on a sm120 GPU:
+Nanochat initially prints the following when run on a sm120 GPU:
 
 ```
 WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback
@@ -23,10 +28,10 @@ WARNING: SDPA has no support for sliding window attention (window_pattern='SSSL'
 WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.
 ```
 
-This is very useful and tells you where to look for performance improvements. Using `--window-pattern L` helps quite a
-bit but it's more of a temporary workaround.
+This is very useful and tells you where to look for performance improvements. Using `--window-pattern L` improves
+training speed quite a bit, but it's more of a temporary workaround.
 
-Runs using `--window-pattern L` represent the nanochat upstream baseline for sm120.
+Benchmarks using `--window-pattern L` represent the nanochat upstream baseline for sm120.
 
 ## What are sm120 GPUs?
 
@@ -173,6 +178,14 @@ paths that take no flags. This is an acceptable trade off given that the purpose
 
 ## Rejected
 
+### NVFP4 training
+
+https://github.com/IST-DASLab/Quartet-II
+
+result: I was hoping nvfp4 would help boost training performance more. The end result was around 10% faster training vs
+fp8. Not a bad result, but it introduces quantization noise. The net result is that fp8 produces a slightly better
+quality model. The 10% speed gain of nvfp4 doesn't pay off.
+
 ### FlexAttention
 
 This was the first attempt to fix the sliding-window problem.
@@ -181,8 +194,8 @@ https://pytorch.org/blog/flexattention/
 
 branch: flex-attention
 
-result: Less than 1% toks/sec improvement; also a minor bpb improvement. Overall not exciting. Compare this with
-NANOCHAT_FA2_SWINDOW=1, which improved toks/sec significantly more while also improving bpb.
+result: Less than 1% toks/sec improvement with a minor bpb improvement. Overall not very significant. Compare this with
+NANOCHAT_FA2_SWINDOW=1, which improves toks/sec significantly while also improving bpb.
 
 ### Exhaustive optimal gemm search
 
@@ -195,6 +208,8 @@ result: Increased startup time and code complexity with near zero performance im
 https://arxiv.org/pdf/2601.22813
 
 https://arxiv.org/pdf/2605.28213
+
+https://arxiv.org/abs/2509.25149
 
 ## License
 
