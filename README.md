@@ -4,7 +4,7 @@
 
 This fork explores sm120 GPU peformance with nanochat. Here are a few questions I was curious about:
 
-1. How does sm120 training performance compare with H100 (sm90)?
+1. How does sm120 training throughput compare with H100 (sm90)?
 2. Can Blackwell specific features (eg, nvfp4) help close the gap?
 3. How does rental cost compare between sm120 and sm90?
 
@@ -28,8 +28,8 @@ WARNING: SDPA has no support for sliding window attention (window_pattern='SSSL'
 WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.
 ```
 
-This is very useful and tells you where to look for performance improvements. Using `--window-pattern L` improves
-training speed quite a bit, but it's more of a temporary workaround.
+This basically pinpoints where to look for performance improvements. Using `--window-pattern L` improves training speed
+quite a bit, but it's more of a workaround.
 
 Benchmarks using `--window-pattern L` are the nanochat upstream baseline for sm120.
 
@@ -59,42 +59,43 @@ These missing features mean that the latest versions of FlashAttention (FA3+) wi
 
 ## runs/shortrun.sh (--num-iterations 50)
 
-These test runs usually complete within 5-10 minutes. Full runs are performed later for model validation.
+These are short runs to get an idea of throughput. Most complete within 5 minutes.
 
 ## --depth 24 --device-batch-size 16
 
-Nanochat runs are usually depth=24, which requires ~60 GB VRAM.
+### 8x RTX Pro 6000 WS
 
-toks/USD: 171M
-
-| GPUs        | toks/sec | mem GB |      bpb | USD/hour |
-|-------------|---------:|-------:|---------:|---------:|
-| 2x H100 SXM |      244 |   57.2 | 1.330220 |     5.00 |
-| 4x H100 SXM |      485 |   54.7 | 1.330113 |    10.00 |
-| 8x H100 SXM |          |        |          |    20.00 |
-
-| GPUs               | toks/sec | mem GB |      bpb | USD/hour |
-|--------------------|---------:|-------:|---------:|---------:|
-| 2x RTX Pro 6000 WS |      130 |     57 | 1.328198 |     2.75 |
-| 4x RTX Pro 6000 WS |          |        |          |     5.50 |
-| 8x RTX Pro 6000 WS |      248 |     53 | 1.324561 |    11.00 |
+| toks/sec | mem GB |      bpb | notes                                                         |
+|---------:|-------:|---------:|---------------------------------------------------------------|
+|     247k |   60.2 | 1.587426 |                                                               |
+|     278k |   52.7 | 1.575156 | --fp8                                                         |
+|     350k |   60.2 | 1.602325 | --window-pattern L                                            |
+|     417k |   52.7 | 1.589898 | --fp8 --window-pattern L                                      |
+|     435k |   52.7 | 1.575121 | --fp8 NANOCHAT_FA2_SWINDOW=1                                  |
+|     456k |   60.3 | 1.575138 | --fp8 NANOCHAT_FA2_SWINDOW=1 --wgrad-nt                       |
+|     482k |   58.5 | 1.588545 | --fp8 NANOCHAT_FA2_SWINDOW=1 --wgrad-nt --fp8-scaling delayed |
+|     585k |   56.2 | 1.582146 | --nvfp4 NANOCHAT_FA2_SWINDOW=1                                |
+|     583k |   56.2 | 1.580403 | --nvfp4 NANOCHAT_FA2_SWINDOW=1 --nvfp4-scaling delayed        |
 
 ### 2x RTX Pro 6000 WS
 
-USD cost/hour: 3.00
-best toks/USD: 155M
-
-| toks/sec | mem GB |      bpb | notes                    |
-|---------:|-------:|---------:|--------------------------|
-|      71k |   64.8 | 1.576989 | baseline (bf16)          |
-|      79k |   57.2 | 1.566846 | --fp8                    |
-|     107k |   64.8 | 1.590402 | --window-pattern L       |
-|     129k |   57.2 | 1.581414 | --fp8 --window-pattern L |
+| toks/sec | mem GB |      bpb | notes                                                         |
+|---------:|-------:|---------:|---------------------------------------------------------------|
+|      71k |   64.8 | 1.576989 |                                                               |
+|      79k |   57.2 | 1.566846 | --fp8                                                         |
+|     107k |   64.8 | 1.590402 | --window-pattern L                                            |
+|     118k |   57.2 | 1.582185 | --fp8 --window-pattern L                                      |
+|     124k |   57.2 | 1.567681 | --fp8 NANOCHAT_FA2_SWINDOW=1                                  |
+|     126k |   55.4 | 1.586394 | --fp8 NANOCHAT_FA2_SWINDOW=1 --fp8-scaling delayed            |
+|     130k |   64.8 | 1.566533 | --fp8 NANOCHAT_FA2_SWINDOW=1 --wgrad-nt                       |
+|     138k |   63.0 | 1.585184 | --fp8 NANOCHAT_FA2_SWINDOW=1 --fp8-scaling delayed --wgrad-nt |
+|     169k |   60.7 | 1.581607 | --nvfp4 NANOCHAT_FA2_SWINDOW=1                                |
+|     169k |   60.7 | 1.581782 | --nvfp4 NANOCHAT_FA2_SWINDOW=1 --nvfp4-scaling delayed        |
 
 ## --depth 12 --device-batch-size 8
 
-These GPUs have less VRAM so depth and device-batch-size must be reduced. This increases training speed, but at the cost
-of model quality.
+The following benchmarks use GPUs with less VRAM, so depth and device-batch-size must be reduced. This increases
+training speed but reduces model quality.
 
 ### training precision: bf16
 
