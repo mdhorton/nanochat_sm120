@@ -71,11 +71,11 @@ These are short runs to get an idea of throughput. Most complete within 5 minute
 |     278k |   52.7 | 1.575156 | --fp8                                                         |
 |     350k |   60.2 | 1.602325 | --window-pattern L                                            |
 |     417k |   52.7 | 1.589898 | --fp8 --window-pattern L                                      |
-|     435k |   52.7 | 1.575121 | --fp8 NANOCHAT_FA2_SWINDOW=1                                  |
-|     456k |   60.3 | 1.575138 | --fp8 NANOCHAT_FA2_SWINDOW=1 --wgrad-nt                       |
-|     482k |   58.5 | 1.588545 | --fp8 NANOCHAT_FA2_SWINDOW=1 --wgrad-nt --fp8-scaling delayed |
-|     585k |   56.2 | 1.582146 | --nvfp4 NANOCHAT_FA2_SWINDOW=1                                |
-|     583k |   56.2 | 1.580403 | --nvfp4 NANOCHAT_FA2_SWINDOW=1 --nvfp4-scaling delayed        |
+|     435k |   52.7 | 1.575121 | NANOCHAT_FA2_SWINDOW=1 --fp8                                  |
+|     456k |   60.3 | 1.575138 | NANOCHAT_FA2_SWINDOW=1 --fp8 --wgrad-nt                       |
+|     482k |   58.5 | 1.588545 | NANOCHAT_FA2_SWINDOW=1 --fp8 --wgrad-nt --fp8-scaling delayed |
+|     585k |   56.2 | 1.582146 | NANOCHAT_FA2_SWINDOW=1 --nvfp4                                |
+|     583k |   56.2 | 1.580403 | NANOCHAT_FA2_SWINDOW=1 --nvfp4 --nvfp4-scaling delayed        |
 
 ### 2x RTX Pro 6000 WS
 

@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # 1) Example launch (simplest):
-# bash runs/speedrun.sh
-# 2) Example launch in a screen session (because the run takes ~1.5 hours):
-# screen -L -Logfile runs/speedrun.log -S speedrun bash runs/speedrun.sh
+# bash runs/speedrun_sm120.sh
+# 2) Example launch in a screen session (because the run takes a while):
+# screen -L -Logfile runs/speedrun_sm120.log -S speedrun_sm120 bash runs/speedrun_sm120.sh
 # 3) Example launch with wandb logging, but see below for setting up wandb first:
-# WANDB_RUN=speedrun screen -L -Logfile runs/speedrun.log -S speedrun bash runs/speedrun.sh
+# WANDB_RUN=speedrun_sm120 screen -L -Logfile runs/speedrun_sm120.log -S speedrun_sm120 bash runs/speedrun_sm120.sh
 
 export NANOCHAT_FA2_SWINDOW=1
 
@@ -71,8 +71,8 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-
 # SFT (teach the model conversation special tokens, tool use, multiple choice)
 
 # run SFT and eval the model
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
+#torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --run=$WANDB_RUN
+#torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"
