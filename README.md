@@ -6,7 +6,7 @@ This fork explores sm120 GPU peformance with nanochat. Here are a few questions 
 
 1. How does sm120 training performance compare with H100 (sm90)?
 2. Can Blackwell specific features (eg, nvfp4) help close the gap?
-3. How does rental cost compare bwtewen sm120 and sm90?
+3. How does rental cost compare between sm120 and sm90?
 
 # TL;DR conclusion
 
@@ -14,7 +14,7 @@ This fork explores sm120 GPU peformance with nanochat. Here are a few questions 
 2. nvfp4 speeds training ~10%, but the gain doesn't justify the hit to model quality. NVIDIA reports success with nvfp4
    training. However, they trained 10 trillion tokens and had significantly better architecture. They were able to keep
    quality in line with fp8. The effort required was justified by the large token count. A sm120 GPU would never see
-   this token count. The conclusion I draw is that sm120 nvfp4 is mostly for inference, not training.
+   this token count. The conclusion I draw is that sm120 nvfp4 is for inference, not training.
 3. TBD
 
 ## Baseline
@@ -31,7 +31,7 @@ WARNING: Recommend using --window-pattern L for full context attention without a
 This is very useful and tells you where to look for performance improvements. Using `--window-pattern L` improves
 training speed quite a bit, but it's more of a temporary workaround.
 
-Benchmarks using `--window-pattern L` represent the nanochat upstream baseline for sm120.
+Benchmarks using `--window-pattern L` are the nanochat upstream baseline for sm120.
 
 ## What are sm120 GPUs?
 
@@ -41,18 +41,19 @@ These are non-datacenter Blackwell GPUs. For example:
 - RTX Pro 4000
 - RTX 5090
 
-They are significantly cheaper vs datacenter Blackwell. However, sm120 GPUs lack several key performance features:
+They are significantly cheaper than datacenter Blackwells. However, sm120 GPUs lack several key performance features:
 
 - no tcgen05
 - no tensor core memory
+- no thread block clusters
 - no NVLink
 
-Furthermore, the non-Pro line (ie, RTX 5090) lack the following:
+Furthermore, the non-Pro line (ie, RTX 5090) GPUs lack the following:
 
 - no ECC vram
 - no P2P capability
 
-These missing features mean that the latest versions of FlashAttention (FA3+) will work on sm120 GPUs.
+These missing features mean that the latest versions of FlashAttention (FA3+) will not work on sm120 GPUs.
 
 # Benchmark results
 
@@ -167,14 +168,14 @@ base flag: --nvfp4
 
 NANOCHAT_FA2_SWINDOW=1
 
-This addition is mostly just wiring code so that existing FA2 kernels are used for sliding-windows.
+This addition is mostly wiring code so that existing FA2 kernels are used for sliding-windows.
 
 FA3 has no sm120 kernels, so the `SSSL` sliding-window default uses an explicit SDPA mask, which is slow. The
-`--window-pattern L` option helps but it's more of a workaround and not optimal. This new option allows it to use FA2
-kernels for the S layers instead of SDPA masking.
+`--window-pattern L` option helps but it's limited. This new option allows it to use FA2 kernels for the S layers
+instead of SDPA masking.
 
 The switch is an environment variable rather than a flag because it has to reach every entry point, including the eval
-paths that take no flags. This is an acceptable trade off given that the purpose of this repo is to explore and learn.
+paths that take no flags. This is an acceptable trade off given the purpose of this repo is to explore and learn.
 
 ## Rejected
 
