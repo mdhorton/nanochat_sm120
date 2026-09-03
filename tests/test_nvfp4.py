@@ -131,6 +131,40 @@ class TestHadamard:
         assert torch.equal(full.micro_scales.float(), top16.micro_scales.float())
         assert torch.equal(full.fp4, top16.fp4)
 
+    def test_quantizing_kernels_write_natural_column_order(self):
+        """The rht128 quantizers put the rotated 128-block back in *natural* column order.
+
+        `nvfp4_numerics`'s one-kernel-family-per-GEMM warning is about the effective matrix being
+        row-swizzled, not about the output columns moving -- so `rht128_quant_eden` and the bf16
+        `transform_rht128` agree up to fp4 error, and a rotated GEMM's residual rotation is just
+        `swizzle_hadamard(h)`. dev/nvfp4-quartet.md, *B0: the rotated forward is a loss*, rests
+        on this; the unrotated control is what makes the comparison mean anything.
+        """
+        torch.manual_seed(0)
+        x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+        h16 = hadamard_matrix(128, torch.bfloat16, "cuda")[:16, :].contiguous()
+        q = rht128_quant_eden(x=x, h=h16, scale_override=1.0)
+        got = dequantize(q.fp4, q.micro_scales, q.tensor_scale)
+        rotated = transform_rht128(h=h16, x=x)
+        assert cosine(got, rotated) == pytest.approx(1.0, abs=0.02)
+        assert abs(cosine(got, x)) < 0.1, "matched the unrotated input -- no rotation was applied"
+
+    def test_the_rotation_inverts_blockwise(self):
+        """`transform_rht128(h[:16], x)` is `x @ A.T` per 128-block, so `@ A` recovers x.
+
+        The un-rotation any rotated-GEMM scheme would need. A is orthonormal only to 2e-4 --
+        bf16 cannot hold 128^-0.5 -- so the round trip is normalized by its own row norm.
+        """
+        torch.manual_seed(0)
+        x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+        h = hadamard_matrix(128, torch.bfloat16, "cuda")
+        a = swizzle_hadamard(h).float()
+        assert (a[0] @ a[0]).item() == pytest.approx(1.0, abs=1e-3)
+        y = transform_rht128(h=h[:16, :].contiguous(), x=x)
+        back = ((y.float().view(256, 2, 128) @ a) / (a[0] @ a[0])).reshape(256, 256)
+        rel = ((back - x.float()).norm() / x.float().norm()).item()
+        assert rel < 5e-3, f"round trip off by {rel:.2e}; bf16 rounding of y alone is ~1e-3"
+
 
 # ---------------------------------------------------------------------------------------------
 # The quantizers, against an independent implementation of the format

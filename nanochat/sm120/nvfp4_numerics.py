@@ -22,12 +22,15 @@ four places, and each is a flag below so the probe can price them separately:
 
 Every flag needs --nvfp4 and defaults to today's behaviour.
 
-**One kernel family per GEMM.** The Quartet kernels do not all write the contraction dim in
-natural order: `rht128_quant_eden` / `rht128_requant` store each rotated 128-block in a fixed
-permuted group order (`had128_utils.cuh`), `quant_had_eden` / `dequant_tp_had_eden` use another,
-and `quant_fp4` plus the torch quantizer below are natural. Two operands from different families
-give a silently wrong product, not an error. So a rotated GEMM takes both operands from the
-rht128 kernels, and an unrotated one takes both from `quant_fp4` or the 2D cache.
+**One kernel family per GEMM.** Both operands of a GEMM must be rotated by the *same* matrix,
+and the kernels bake in different ones. `rht128_quant_eden` / `rht128_requant` rotate each
+128-block by `swizzle_hadamard(h)` -- the Hadamard's rows in the kernel's own order
+(`had128_utils.cuh`), written back in natural column order -- `quant_had_eden` /
+`dequant_tp_had_eden` apply whatever 128x128 matrix they are handed and match the rht128 kernels
+only when handed `swizzle_hadamard(h)`, and `quant_fp4` plus the torch quantizer below rotate by
+nothing. Two operands from different families give a silently wrong product, not an error. So a
+rotated GEMM takes both operands from the rht128 kernels, and an unrotated one takes both from
+`quant_fp4` or the 2D cache. Pinned by `tests/test_nvfp4.py::TestHadamard`.
 """
 import re
 from dataclasses import dataclass

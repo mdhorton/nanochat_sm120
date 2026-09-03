@@ -76,7 +76,8 @@ than the compounding systematic.
   C2's +0.0137 and its gain is flat across training (0.0036 -> 0.0022 from step 500 to 2500) while
   the deficit underneath widens at plain NVFP4's rate. It removes a constant offset, not the
   compounding systematic. **Forward noise in the blocks, not lm_head, is the cost at d12**;
-  value-level stochastic rounding (CUDA) is the remaining lever.
+  ~~value-level stochastic rounding (CUDA) is the remaining lever~~ — SR on forward tensors
+  diverges in NVIDIA's own ablation (nvfp4-quartet.md, *Numerics: C8 / What this justifies*).
 - Of the queued candidates only `--nvfp4-bf16-blocks 0,1` still earns an arm — it attacks the
   block forwards, where C5 says the cost is. `--nvfp4-scaling delayed` and `--nvfp4-bwd-source
   bf16` are backward-side; C5 gives no reason to expect either to move a forward-noise deficit.
@@ -90,6 +91,6 @@ than the compounding systematic.
 lm_head is a quarter of d12's linear compute and much less of d24's, so the recipe's gain should
 *shrink* with depth while the block-forward deficit C5 points at grows. That makes d24 a weaker
 case for the recipe, not a stronger one, and argues for spending the RTX PRO 6000 box on
-stochastic rounding rather than on a d24 confirmation of a 17% partial fix. The 100-step d24 pair
+~~stochastic rounding~~ per-layer forward selection rather than on a d24 confirmation of a 17% partial fix. The 100-step d24 pair
 (fp8 1.302880, nvfp4 1.288498, both warmdown 0.2) is inside noise and decides nothing; C5's w20
 result now also contradicts the schedule it used.

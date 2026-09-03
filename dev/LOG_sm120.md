@@ -90,3 +90,17 @@ of the layer's FLOPs. Per micro-step, compiled: all-fp4 15.6 ms, fp8 22.1, bf16 
 wgrad+delayed 18.4, fp8 forward over the NVFP4 backward 17.9. The last is now a flag value: fp8
 forward GEMM (weight cached per step), Quartet backward from the bf16 operands, so unbiased. Probe:
 same loss delta as fp8 (+0.0422 vs +0.0768 all-fp4). 48 tests. tok/s and bpb unmeasured.
+
+2026-09-03 B0 (Hadamard-rotated forward) ruled out by probe, before it was built
+scripts/probe_fwd_rht.py: rotating both forward operands loses 0.06-0.08 effective bits on real
+activations, worst on mlp.c_proj and lm_head, whose sparse spiky inputs the per-16 block scale
+already quantizes best. The fused-EDEN form loses 0.24, of which 0.17 is EDEN's stochastic scale
+against 4/6 and not the rotation. No width from 2 to 128 pays. The rotation also would not cancel
+past the forward GEMM (rht128_requant rotates the other axis). Two tests pin the kernel facts it
+rests on. Value-level SR is a backward lever only -- NVIDIA's ablation (2509.25149) has SR on
+forward tensors diverging -- so it is not the forward candidate the notes had queued.
+probe_nvfp4_numerics gained fp8fwd-<type> variants. On the fp4-trained checkpoint the residual
+forward noise is +0.012 against +0.077 on the fp8-trained one, and excluding lm_head or the last
+block closes nothing there: the model adapted, and most of the deficit is in the trained weights,
+which a static probe cannot see. Single-layer greedy selection from one batch is first-order noise
+(removals sum to 3x the whole). Details: dev/nvfp4-quartet.md, *B0* and *Forward noise by layer type*.

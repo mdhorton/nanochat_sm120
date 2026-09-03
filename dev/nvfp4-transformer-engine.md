@@ -70,9 +70,9 @@ Four levers, all Python, all opt-in behind `--nvfp4`, in `nanochat/sm120/nvfp4_n
 Not ported: value-level stochastic rounding (`cvt.rs.satfinite.e2m1x4`, sm_100a only; TE has
 a software emulation next to it in `common/util/ptx.cuh`) and the 16x16 Hadamard (ours is 128).
 
-**One kernel family per GEMM.** `rht128_*` kernels store each rotated 128-block in a permuted
-group order; `quant_fp4` and the 2D cache are natural order. Mixing them is a silently wrong
-product (cosine ~0.1). Every variant's gradients are projected onto the bf16 gradient in
+**One kernel family per GEMM.** `rht128_*` kernels rotate each 128-block by
+`swizzle_hadamard(h)`, a row-permuted Hadamard; `quant_fp4` and the 2D cache are unrotated. Mixing
+them is a silently wrong product (cosine ~0.1). Every variant's gradients are projected onto the bf16 gradient in
 `tests/test_nvfp4_numerics.py` for that reason.
 
 **Finding: EDEN's unbiasedness is the random rotation.** Values are rounded to nearest in every

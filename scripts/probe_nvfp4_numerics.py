@@ -49,6 +49,13 @@ VARIANTS = {
     "fp8fwd+2+4": {"exclude": frozenset({"lm_head"}), "bf16_blocks": (2, 4), "exclude_precision": "fp8-fwd"},
     "fp8fwd+bwd-bf16": {"exclude": frozenset({"lm_head"}), "exclude_precision": "fp8-fwd", "bwd_source": "bf16"},
     "bf16-blocks-2+4": {"bf16_blocks": (2, 4)},
+    # forward noise by layer type: every Linear of one kind in fp8-fwd, everything else fp4
+    "fp8fwd-mlp.c_proj": {"exclude": frozenset({"mlp.c_proj"}), "exclude_precision": "fp8-fwd"},
+    "fp8fwd-mlp.c_fc": {"exclude": frozenset({"mlp.c_fc"}), "exclude_precision": "fp8-fwd"},
+    "fp8fwd-attn.c_proj": {"exclude": frozenset({"attn.c_proj"}), "exclude_precision": "fp8-fwd"},
+    "fp8fwd-qkv": {"exclude": frozenset({"c_q", "c_k", "c_v"}), "exclude_precision": "fp8-fwd"},
+    "fp8fwd-all": {"exclude": frozenset({"c_q", "c_k", "c_v", "c_proj", "c_fc", "lm_head"}),
+                   "exclude_precision": "fp8-fwd"},
     "bwd-bf16": {"bwd_source": "bf16"},
     "rht-wgrad": {"rht": "wgrad"},
     "rht-none": {"rht": "none", "bwd_source": "bf16"},

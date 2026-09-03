@@ -788,6 +788,7 @@ tests/test_nvfp4.py                54 tests
 scripts/bench_nvfp4.py             per-shape probe (forward only; see caveat below)
 scripts/probe_fp4_gemm.py          the GEMM inventory, autotuned against _scaled_mm (queue A1)
 scripts/arm_batch.sh               batched-arm throughput A/B (A, B, A) for any two flag sets
+scripts/probe_fwd_rht.py           forward-GEMM error with/without a rotation, on captured tensors
 ```
 
 The profiling harness this file quotes measurements from — `scripts/profile_train.py`,
@@ -1187,20 +1188,133 @@ fraction of it.
 
 ### What this justifies
 
-**The Hadamard-rotated forward moves to the front of the queue, ahead of stochastic rounding.**
-Rotating both operands cancels across the GEMM — (X·H)(H^T·W^T) = X·W^T — so it is mathematically
-free, it flattens the outliers that drive 16-element block scales, and `rht128_quant_eden` already
-exists for the backward. It attacks exactly the term C8 measured, with no bias/variance tradeoff
-to argue about. Mind the one-kernel-family-per-GEMM rule (`nvfp4_numerics.py:25-30`): a rotated
-GEMM takes both operands from the rht128 kernels.
+~~**The Hadamard-rotated forward moves to the front of the queue, ahead of stochastic
+rounding.**~~ — **measured 2026-09-03 and reversed before it was built.** Rotating both forward
+operands is arithmetically free, but on real activations it *costs* 0.06–0.08 effective bits of
+forward accuracy rather than buying any, and the fused-EDEN form B0 proposed reusing costs 0.24 on
+73 of 73 layers. See *B0: the rotated forward is a loss* below.
 
-Value-level stochastic rounding stays second: same target, strictly more work, and it trades bias
-for variance rather than removing the error.
+~~**So value-level stochastic rounding is now first**, by elimination~~ — **no: SR is a backward
+lever, and C8's term is the forward.** NVIDIA's ablation (arXiv 2509.25149 §4.4, App. E.3) rounds
+gradients stochastically and weights/activations to nearest, and reports that SR on activations or
+weights *diverges* at 1.2B — it amplifies the rounding error the forward sees. Its place here is
+making TE's unrotated-dgrad placement honest, not the forward deficit. What C8 measured is
+unchanged — the fp4 forward is still where the deficit lives, and the headroom is still the full
++0.0138 — but the only forward lever left is *selection*, which layers run fp8, and the next
+section prices it on the fp4-trained checkpoint: mostly adapted away.
 
 **None of this rescues d12.** C8 runs 104.06m against `--fp8 --fp8-scaling delayed --wgrad-nt`'s
 95.46m, so an fp8 forward over an fp4 backward is both slower and behind at this depth. C8's value
 is diagnostic — it prices the headroom that justifies the kernel work, and the work pays off at
 d24, where NVFP4 still holds ~1.21x (*Numerics: C6*).
+
+## B0: the rotated forward is a loss, and the block scale is why — 2026-09-03
+
+`scripts/probe_fwd_rht.py`, two checkpoints, one real batch each, all 73 convertible Linears.
+Capture `(x, W)` per layer, run the fp4 forward GEMM with and without the rotation, and score
+effective bits against the fp32 product of the same operands. Positive is better:
+
+| rotation                                                    | c2-fp8-s42                | c2-nvfp4-s42        |
+|-------------------------------------------------------------|---------------------------|---------------------|
+| `transform_rht128` + 4/6 (what `--nvfp4-fwd-rht` would run)  | **−0.0798** (53/73 worse) | **−0.0592** (19/73) |
+| `rht128_quant_eden` (what B0's row proposed reusing)         | **−0.2425** (73/73 worse) | **−0.2206** (73/73) |
+| `quant_fp4` EDEN, unrotated — control for the row above      | −0.1680 (72/73)           | −0.1654 (73/73)     |
+| torch, 2 / 4 / 8-wide (inside one block)                     | −0.012 / −0.020 / −0.027  | +0.023 / +0.017 / +0.009 |
+| torch, 16-wide                                               | −0.0376                   | −0.0021             |
+| torch, 32-wide                                               | −0.0592                   | −0.0338             |
+| torch, 64-wide                                               | −0.0732                   | −0.0502             |
+| torch, 128-wide                                              | −0.0764                   | −0.0579             |
+
+**Monotone in width from 16 up, and nothing pays at any width**: inside a block (2/4/8-wide)
+the effect is within ±0.02 bits and flips sign between checkpoints. The EDEN row is mostly not
+the rotation: unrotated EDEN costs −0.17 on its own (a stochastic block scale against 4/6's
+min-MSE choice), so the rotation's share of −0.24 is the same −0.06 to −0.08 the top row measures.
+
+### Why, and it generalises
+
+The harm is concentrated exactly where the outlier-flattening story predicts a *gain*. Sorting by
+damage puts `mlp.c_proj` of every block at the top (−0.36 to −0.86 bits) and `lm_head` next
+(−0.36), and those are the layers whose input `amax/rms` runs 42 to 1287 against ~7 for the rest.
+
+**NVFP4 scales per 16 elements, so a concentrated outlier is already isolated.** The one block of
+16 that contains it takes a large E4M3 scale; the other 47 blocks of a 768-wide row keep small
+scales and full precision. Those layers are in fact the ones the unrotated forward quantizes
+*best*: `mlp.c_proj`'s plain effective bits (3.5–3.96) are the highest in the model against
+2.8–3.5 elsewhere, because a relu² output is sparse and its zeros are exact. A 128-wide rotation spreads that outlier's energy over all 128 lanes,
+so all 8 blocks in the group inherit the magnitude: one bad block is traded for eight mediocre
+ones, and summed over K that is worse. Rotation is the fix for a scale that is *coarse relative to
+the outlier* — per-tensor fp8, which is where QuaRot, SpinQuant and TE's wgrad RHT come from. A
+1-in-16 block scale has already done that job.
+
+This is not an argument against the *backward's* RHT, which is there for a different reason: EDEN
+needs the rotation to make its block scale an unbiased estimator, not to widen dynamic range.
+
+### The design the probe saved
+
+Worth recording, because the queue row understated the work and the next rotation idea will hit
+the same wall. **"Rotations cancelling across the GEMM" holds for the forward GEMM alone, not end
+to end.** The forward would rotate along K; the backward's `rht128_requant` transposes *and*
+rotates along M (`quartet/quant.py:338`), a different axis, so the forward's K-rotation lands on
+the *uncontracted* axis of the requant output and survives into both backward results:
+`dgrad = (E·W)·Aᵀ` and `wgrad = (Eᵀ·X)·Aᵀ`, where `A = swizzle_hadamard(had)`. Undoing it needs a
+second unrotated fp4 weight in the cache (for dgrad) plus a once-per-optimizer-step un-rotation of
+the fp32 gradient accumulator (for wgrad, which is exact because `A` is fixed and accumulation is
+linear). That is an M-sized change, not the S the row implied.
+
+Two mechanical facts the probe pinned along the way, both reusable:
+
+- `transform_rht128(h[:16], x)` is `x·Aᵀ` blockwise **in natural column order**, and
+  `rht128_quant_eden` writes the same order (cosine 0.995 against it, against 0.005 for the
+  unrotated control). So the one-kernel-family warning in `nvfp4_numerics.py` is about the
+  effective matrix being `swizzle_hadamard(h)` rather than `h`, not about the output columns
+  moving; its docstring now says so.
+- `A` is orthonormal to 2e-4: the bf16 rounding of 128^-0.5 leaves `A·Aᵀ = 0.99979·I`, which is
+  ~20x below bf16's own rounding of the output and would not have needed correcting.
+
+### What it costs to know this
+
+Nothing but the probe — the lever was never built. The gate was designed as step 2 of the
+implementation plan and run first, which is the order to keep: **a forward-error probe on real
+captured tensors is ~2 minutes and prices any forward-numerics lever before the ~1.7 h horizon
+arm, and before the code.** `--nvfp4-fwd-rht` does not exist and should not be added.
+
+## Forward noise by layer type, and which checkpoint to probe — 2026-09-03
+
+`scripts/probe_nvfp4_numerics.py` gained `fp8fwd-<type>` variants: one layer type in `fp8-fwd`,
+the rest fp4. Units are 768² GEMMs (a block is 12, the trunk 144, lm_head 43). "closed" is the
+share of the all-fp4 loss delta removed, one batch, step 2520 of each checkpoint.
+
+| in fp8-fwd                          | units | fp8-trained (c2-fp8-s42) | fp4-trained (c2-nvfp4-s42) |
+|-------------------------------------|------:|-------------------------:|---------------------------:|
+| nothing (all fp4)                   |     0 | +0.0768                  | +0.0121                    |
+| lm_head (C5's recipe)               |    43 | +0.0422 (45%)            | +0.0124 (0%)               |
+| lm_head + last block (`0,1`)        |    55 | +0.0291 (62%)            | +0.0128 (0%)               |
+| every `attn.c_proj`                 |    12 | +0.0657 (14%)            | +0.0125 (0%)               |
+| every `mlp.c_proj`                  |    48 | +0.0623 (19%)            | +0.0117 (4%)               |
+| every `mlp.c_fc`                    |    48 | +0.0622 (19%)            | +0.0126 (0%)               |
+| every `c_q`/`c_k`/`c_v`             |    36 | +0.0626 (19%)            | +0.0108 (11%)              |
+| lm_head + first 2 / last 4 (C6)     |   115 | +0.0147 (81%)            | +0.0090 (25%)              |
+| everything (C8)                     |   187 | +0.0027 (97%)            | +0.0055 (54%)              |
+
+**The fp8-trained checkpoint measures a perturbation the fp4 run mostly never pays.** A model
+trained in fp4 has adapted to its own forward noise — residual +0.012 against +0.077 — and
+lm_head and the last block, 62% of the perturbation on the fp8 checkpoint, cost it nothing. That
+is C5's "the recipe only shifts the curve", in two minutes. On this batch the fp4-trained model is
+0.044 worse *in bf16* than the fp8-trained one and loses a further 0.012 to its own forward, so
+most of the deficit lives in the weights the noisy forward trained, not in the noise at eval time,
+and a static probe sees only the latter. Read the fp8-checkpoint numbers as an upper bound (they
+over-predicted C5 by 2.6x and C6 by 2.2x) and probe the fp4-trained checkpoint alongside.
+
+**Single-layer greedy selection does not work from one batch.** Excluding each of the 73 layers
+alone sums to +0.236 of removal against a whole delta of +0.077: a one-layer delta is the
+first-order term g·δ, whose sign belongs to the batch (block 0's `mlp.c_fc` reads as *helping*
+fp4). A greedy top-12 by removal per unit predicted −0.018 and landed at +0.033 — no better than
+every `attn.c_proj` (+0.032) or the last block (+0.029). Rank by type or by block, never by layer.
+
+What it leaves: every forward lever a probe can price is priced — rotation (B0), SR (diverges),
+selection (diffuse, and adapted away) — and the forward quantizer is already a per-block min-MSE
+choice. What remains is training dynamics, which only arms answer, and the arm that decides
+anything is C3 at d24.
 
 ## Queue
 
@@ -1241,7 +1355,7 @@ follow-on that shares one per-tensor scale and is therefore not.
 |------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------|-------|
 | ~~**B1**~~ | ~~**Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass~~ — **built 2026-08-31, `--nvfp4-scaling delayed`**                                                                                                                                                                                                                                          | ≤148 ms/step (4.1%) direct, **still not measured end to end** — but C6 measured the *fp8* counterpart `--fp8-scaling delayed` as free at this horizon, which raises the prior; B2/B4 unblocked | —          | M     |
 | **B2**     | **Fuse the quantize into its producer** so `x` is never re-read in bf16                                                                                                                                                                                                                                                                                                      | the ~68 ms glue gap against fp8; both quantize kernels are at 76-85% DRAM, so bytes are the currency                                                                                           | B1         | L     |
-| **B0**     | **Hadamard-rotate the *forward*, rotations cancelling across the GEMM** — `(X·H)(H^T·W^T) = X·W^T`, so it is free arithmetically and flattens the outliers that drive the 16-element block scales. The forward quantizes unrotated today (`quant_fp4`, `nvfp4.py:145,149`); RHT is backward-only. Reuses `rht128_quant_eden`; both operands must come from the rht128 family | **the −0.0132 C8 prices**, the largest measured number on either list. Speed cost unmeasured                                                                                                   | —          | M     |
+| ~~**B0**~~ | ~~**Hadamard-rotate the *forward***~~ — **ruled out 2026-09-03, before it was built.** The rotation cancels across the forward GEMM, but on real activations it *loses* 0.06–0.08 effective bits (0.24 in the `rht128_quant_eden` form the row proposed), worst at exactly the outlier-heavy layers it was meant to help. It also does not cancel past the forward — see *B0: the rotated forward is a loss* | the probe cost 2 minutes | — | — |
 | **B3**     | **Hold the RHT sign pattern across the grad-accum window**, re-randomizing per optimizer step                                                                                                                                                                                                                                                                                | makes `rht128_requant(w)` cacheable — the withdrawn "+21%" claim in *Where the speed comes from*                                                                                               | —          | **S** |
 | **B4**     | **Fold the eden scratch round-trip** (bf16 scales written, read back, rewritten as fp8)                                                                                                                                                                                                                                                                                      | 35.3 ms + 7,744 launches + most of A6's `cudaMemset`                                                                                                                                           | B1         | M     |
 
@@ -1327,6 +1441,10 @@ C2.**
 - **`--nvfp4-bwd-source bf16` (TE's "quantize both orientations from the high-precision input")** —
   +0.0200 against plain's +0.0138 and a two-thirds higher growth rate. Forward/backward
   consistency beats fidelity to bf16 here. See *Numerics: C7*.
+- **A Hadamard-rotated forward (queue B0)** — −0.0798 effective bits at 128-wide and −0.2425
+  fused with EDEN (73 of 73 layers), monotone in rotation width across two checkpoints. NVFP4's
+  per-16 block scale already isolates the outliers the rotation was meant to flatten, so spreading
+  them costs. See *B0: the rotated forward is a loss*.
 - **NVFP4 at d12 on wall-clock grounds** — against `--fp8-scaling delayed --wgrad-nt` the speed
   margin is 1.015x for the arm carrying the full deficit, and every configuration that narrows
   the deficit is slower than fp8. See *Numerics: C6*. This is d12-specific; d24 is untested and
