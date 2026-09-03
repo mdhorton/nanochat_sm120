@@ -16,15 +16,15 @@ The d24 question is separate (see *Then d24*).
 Base, identical to C2: `--depth 12 --device-batch-size 8 --target-param-data-ratio 12 --seed 42`.
 Seed 42 pairs every new arm with the existing C2 checkpoints.
 
-| arm | flags | status |
-|---|---|---|
-| fp8, warmdown 0.65 | `--fp8` | done: c2-fp8-s42 0.833421 (s43 0.833425) |
-| nvfp4 plain, 0.65 | `--nvfp4` | done: c2-nvfp4-s42 0.847110 (s43 0.847187) |
-| nvfp4 recipe, 0.65 | `--nvfp4 --nvfp4-exclude lm_head --nvfp4-exclude-precision fp8-fwd` | done: c5-nvfp4-recipe-w65 0.844619 |
-| fp8, 0.2 | `--fp8 --warmdown-ratio 0.2` | done: c5-fp8-w20 0.840602 |
-| nvfp4 recipe, 0.2 | recipe flags + `--warmdown-ratio 0.2` | done: c5-nvfp4-recipe-w20 0.853487 |
-| fp8, 0.65 (control) | `--fp8` | done: c5-fp8-w65 0.833176 |
-| nvfp4 plain, 0.65 (control) | `--nvfp4` | done: c5-nvfp4-plain-w65 0.846993 |
+| arm                         | flags                                                               | status                                     |
+|-----------------------------|---------------------------------------------------------------------|--------------------------------------------|
+| fp8, warmdown 0.65          | `--fp8`                                                             | done: c2-fp8-s42 0.833421 (s43 0.833425)   |
+| nvfp4 plain, 0.65           | `--nvfp4`                                                           | done: c2-nvfp4-s42 0.847110 (s43 0.847187) |
+| nvfp4 recipe, 0.65          | `--nvfp4 --nvfp4-exclude lm_head --nvfp4-exclude-precision fp8-fwd` | done: c5-nvfp4-recipe-w65 0.844619         |
+| fp8, 0.2                    | `--fp8 --warmdown-ratio 0.2`                                        | done: c5-fp8-w20 0.840602                  |
+| nvfp4 recipe, 0.2           | recipe flags + `--warmdown-ratio 0.2`                               | done: c5-nvfp4-recipe-w20 0.853487         |
+| fp8, 0.65 (control)         | `--fp8`                                                             | done: c5-fp8-w65 0.833176                  |
+| nvfp4 plain, 0.65 (control) | `--nvfp4`                                                           | done: c5-nvfp4-plain-w65 0.846993          |
 
 Run 2026-09-03 as five arms, 8.7 h: the two 0.65 controls were added because C2 was measured in
 the sibling checkout (`sm120_nanochat`), so its constants are a cross-tree reference. They
@@ -56,12 +56,12 @@ Progress: `dev-ignore/overnight/c5/progress.txt`; final bpb:
 
 Answered within the batch rather than against C2, since the controls ran.
 
-| pair | question | answer |
-|---|---|---|
-| recipe 0.65 vs fp8 0.65 | how much of the +0.0137 the recipe closes | **+0.011443** — 17% closed |
-| recipe 0.65 vs plain 0.65 | the recipe's gain in isolation | **-0.002374**, flat across training |
-| fp8 0.2 vs fp8 0.65 | what 80/20 does to fp8 alone at this horizon | **+0.007426** — a loss |
-| recipe 0.2 vs fp8 0.2 | the deficit under NVIDIA's schedule | **+0.012885** — worse than at 0.65 |
+| pair                      | question                                     | answer                              |
+|---------------------------|----------------------------------------------|-------------------------------------|
+| recipe 0.65 vs fp8 0.65   | how much of the +0.0137 the recipe closes    | **+0.011443** — 17% closed          |
+| recipe 0.65 vs plain 0.65 | the recipe's gain in isolation               | **-0.002374**, flat across training |
+| fp8 0.2 vs fp8 0.65       | what 80/20 does to fp8 alone at this horizon | **+0.007426** — a loss              |
+| recipe 0.2 vs fp8 0.2     | the deficit under NVIDIA's schedule          | **+0.012885** — worse than at 0.65  |
 
 The per-eval trajectory (eval every 250 steps) settled which of the two it is: **the recipe only
 shifts the curve.** Its gain runs 0.0036 / 0.0026 / 0.0027 / 0.0020 / 0.0022 at steps 500-2500

@@ -1,8 +1,9 @@
 # NVFP4 training on sm_120, via Quartet-II
 
 Integration of [Quartet-II](https://github.com/IST-DASLab/Quartet-II) (arXiv:2601.22813, ICML
+
 2026) — NVFP4 for **both** the forward and the backward, where this fork's own fp4 attempt was
-forward-only and shelved.
+      forward-only and shelved.
 
 ```bash
 .venv/bin/python -m scripts.base_train --depth 12 --nvfp4 ...
@@ -17,14 +18,14 @@ the NVFP4 path. Passing any of them without `--nvfp4` is an error rather than a 
 the startup log prints a `disabled:` line whenever a piece is opted out, so an arm's log always
 records what it actually ran.
 
-| flag | default | what |
-|---|---|---|
-| `--nvfp4` | off | NVFP4 forward and backward, plus the four below |
-| `--nvfp4-weight-cache` | **on with `--nvfp4`** | quantize weights once per optimizer step. **+1.8-2.0%, +437 MiB — worth it** |
-| `--nvfp4-lt-gemm` | **on with `--nvfp4`** | drive the fp4 GEMMs through cuBLASLt directly instead of `_scaled_mm`. **~0% on its own** — it exists as the seam the two epilogue items need (queue A1) |
-| `--nvfp4-epilogue-alpha` | **on with `--nvfp4`** | apply the per-tensor scale inside the GEMM epilogue. **+0.35%**; also one bf16 rounding fewer, which is 0.1% of the GEMM's error and therefore not a reason on its own. Follows `--nvfp4-lt-gemm` (queue A2) |
-| `--nvfp4-fuse-wgrad` | **on with `--nvfp4`** | accumulate the weight gradient inside the wgrad epilogue (`beta=1` into an fp32 buffer) instead of by a separate cast-and-add. **+4.07% and −166 MiB — the largest item on this branch.** Follows `--nvfp4-lt-gemm` (queue A3) |
-| `--nvfp4-rne` | off | plain round-to-nearest forward instead of 4/6. **Deliberately not in the stack**: it takes accuracy away, so it is an ablation, not a recommendation |
+| flag                     | default               | what                                                                                                                                                                                                                           |
+|--------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--nvfp4`                | off                   | NVFP4 forward and backward, plus the four below                                                                                                                                                                                |
+| `--nvfp4-weight-cache`   | **on with `--nvfp4`** | quantize weights once per optimizer step. **+1.8-2.0%, +437 MiB — worth it**                                                                                                                                                   |
+| `--nvfp4-lt-gemm`        | **on with `--nvfp4`** | drive the fp4 GEMMs through cuBLASLt directly instead of `_scaled_mm`. **~0% on its own** — it exists as the seam the two epilogue items need (queue A1)                                                                       |
+| `--nvfp4-epilogue-alpha` | **on with `--nvfp4`** | apply the per-tensor scale inside the GEMM epilogue. **+0.35%**; also one bf16 rounding fewer, which is 0.1% of the GEMM's error and therefore not a reason on its own. Follows `--nvfp4-lt-gemm` (queue A2)                   |
+| `--nvfp4-fuse-wgrad`     | **on with `--nvfp4`** | accumulate the weight gradient inside the wgrad epilogue (`beta=1` into an fp32 buffer) instead of by a separate cast-and-add. **+4.07% and −166 MiB — the largest item on this branch.** Follows `--nvfp4-lt-gemm` (queue A3) |
+| `--nvfp4-rne`            | off                   | plain round-to-nearest forward instead of 4/6. **Deliberately not in the stack**: it takes accuracy away, so it is an ablation, not a recommendation                                                                           |
 
 `--no-nvfp4-lt-gemm` takes the two epilogue items with it, since neither is expressible through
 `_scaled_mm`; asking for one of them *and* dropping the launcher is a contradiction and raises.
@@ -43,13 +44,13 @@ arm is now `--nvfp4 --no-nvfp4-fuse-wgrad`.
 `SSSL`, 100 steps, tok/s at step 99 — perf-log.md's batched-arm protocol, reference repeated.
 Measured 2026-08-18 as one batch (queue D1 + D3), logs in `dev-ignore/d1d3-arms/`:
 
-| arm | tok/s @ step 99 | MFU | peak MiB |
-|---|---|---|---|
-| `--fp8` | 29,040 | 37.84% | 16,136 |
-| **`--nvfp4`** | **37,532** | **48.91%** | 16,811 |
-| `--nvfp4 --no-nvfp4-weight-cache --no-nvfp4-lt-gemm` | 35,073 | 45.70% | 16,796 |
-| bf16 | 23,493 | 30.61% | 17,629 |
-| `--fp8` (repeat) | 28,949 | 37.72% | 16,136 |
+| arm                                                  | tok/s @ step 99 | MFU        | peak MiB |
+|------------------------------------------------------|-----------------|------------|----------|
+| `--fp8`                                              | 29,040          | 37.84%     | 16,136   |
+| **`--nvfp4`**                                        | **37,532**      | **48.91%** | 16,811   |
+| `--nvfp4 --no-nvfp4-weight-cache --no-nvfp4-lt-gemm` | 35,073          | 45.70%     | 16,796   |
+| bf16                                                 | 23,493          | 30.61%     | 17,629   |
+| `--fp8` (repeat)                                     | 28,949          | 37.72%     | 16,136   |
 
 The reference repeat reproduces to **0.31%**, so every delta here clears the 2% bar. This is the
 first table in this file measured *after* the windowed-flash port; all five arms log
@@ -91,17 +92,17 @@ it is the one that decided against the previous fp4 arm.
 
 Amortized GPU-only timings, M=16,384 tokens, the three GEMMs of a layer plus all quantization:
 
-| shape | bf16 GEMMs | fp4 total | speedup | + `--nvfp4-weight-cache` |
-|---|---|---|---|---|
-| 768→768 (d12) | 0.713 ms | 1.020 | 0.70x | 0.76x |
-| 768→3072 | 2.945 | 3.119 | 0.94x | 0.97x |
-| 3072→768 | 2.728 | 2.206 | 1.24x | 1.29x |
-| 1280→1280 (d20) | 2.157 | 1.840 | 1.17x | 1.23x |
-| 1280→5120 | 7.961 | 5.828 | 1.37x | 1.39x |
-| 5120→1280 | 7.416 | 4.223 | 1.76x | 1.79x |
-| 1536→1536 (d24) | 2.721 | 2.265 | 1.20x | 1.25x |
-| 1536→6144 | 11.774 | 7.491 | 1.57x | 1.59x |
-| 6144→1536 | 12.139 | 5.459 | 2.22x | 2.26x |
+| shape           | bf16 GEMMs | fp4 total | speedup | + `--nvfp4-weight-cache` |
+|-----------------|------------|-----------|---------|--------------------------|
+| 768→768 (d12)   | 0.713 ms   | 1.020     | 0.70x   | 0.76x                    |
+| 768→3072        | 2.945      | 3.119     | 0.94x   | 0.97x                    |
+| 3072→768        | 2.728      | 2.206     | 1.24x   | 1.29x                    |
+| 1280→1280 (d20) | 2.157      | 1.840     | 1.17x   | 1.23x                    |
+| 1280→5120       | 7.961      | 5.828     | 1.37x   | 1.39x                    |
+| 5120→1280       | 7.416      | 4.223     | 1.76x   | 1.79x                    |
+| 1536→1536 (d24) | 2.721      | 2.265     | 1.20x   | 1.25x                    |
+| 1536→6144       | 11.774     | 7.491     | 1.57x   | 1.59x                    |
+| 6144→1536       | 12.139     | 5.459     | 2.22x   | 2.26x                    |
 
 The last column is the forward `quant_fp4(weight)` amortized over grad-accum 8 — worth **2-8%**
 per shape, and **+1.8-2.0% end to end** (measured twice, see *The weight cache* below). An earlier version
@@ -118,12 +119,12 @@ per call that the quantized paths replace.
 
 `lm_head` at its real widths (this tokenizer is 32,768), M=16,384:
 
-| shape | bf16 GEMMs | fp4 GEMMs | quant | total | speedup |
-|---|---|---|---|---|---|
-| d12 `768→32768` | 30.71 ms | 23.63 | 8.09 | 31.72 | 0.97x |
-| d20 `1280→32768` | 46.36 | 27.97 | 8.57 | 36.55 | **1.27x** |
-| d24 `1536→32768` | 55.33 | 30.13 | 8.80 | 38.93 | **1.42x** |
-| ~~`768→65536`~~ | 50.93 | 48.37 | 18.11 | 66.48 | 0.77x |
+| shape            | bf16 GEMMs | fp4 GEMMs | quant | total | speedup   |
+|------------------|------------|-----------|-------|-------|-----------|
+| d12 `768→32768`  | 30.71 ms   | 23.63     | 8.09  | 31.72 | 0.97x     |
+| d20 `1280→32768` | 46.36      | 27.97     | 8.57  | 36.55 | **1.27x** |
+| d24 `1536→32768` | 55.33      | 30.13     | 8.80  | 38.93 | **1.42x** |
+| ~~`768→65536`~~  | 50.93      | 48.37     | 18.11 | 66.48 | 0.77x     |
 
 The last row is **not a shape in this model** — an earlier pass assumed a 65,536 vocab, and the
 "lm_head is the weak shape, at 0.76x" claim came from it. It reproduces exactly at that width, so
@@ -142,31 +143,31 @@ GPU, same `.venv` (cu128), arms run back to back from a common 45 C start. This 
 kernel-level map of the NVFP4 arm; every earlier throughput claim in this file is a wall-clock
 A/B with no decomposition behind it.
 
-| arm | GPU ms/step | distinct kernels | vs bf16 | vs fp8 |
-|---|---:|---:|---:|---:|
-| bf16 | 5,658.9 | 176 | 1.00x | — |
-| `--fp8` | 4,566.8 | 246 | 1.24x | 1.00x |
-| **`--nvfp4 --nvfp4-weight-cache`** | **3,639.8** | 190 | **1.55x** | **1.25x** |
+| arm                                | GPU ms/step | distinct kernels |   vs bf16 |    vs fp8 |
+|------------------------------------|------------:|-----------------:|----------:|----------:|
+| bf16                               |     5,658.9 |              176 |     1.00x |         — |
+| `--fp8`                            |     4,566.8 |              246 |     1.24x |     1.00x |
+| **`--nvfp4 --nvfp4-weight-cache`** | **3,639.8** |              190 | **1.55x** | **1.25x** |
 
 The nvfp4 total reconciles with wall clock to **0.2%** (3,639.8 ms captured against 3,631 ms/step
 measured in the windowing A/B), which is the check that the capture is measuring the real step.
 
 ### The nvfp4 step, by group
 
-| group | ms/step | % | n/step |
-|:---|---:|---:|---:|
-| GEMM fp4 (block-scaled) | 990.1 | 27.2 | 5,808 |
-| pointwise (elementwise, norm, cast) | 794.0 | 21.8 | 19,611 |
-| reduction (amax / softmax / CE) | 584.3 | 16.1 | 5,153 |
-| attention (flash fwd+bwd) | 501.3 | 13.8 | 1,280 |
-| **fp4 rotate + quantize, bwd** (`rht128_eden`) | 314.3 | 8.6 | 3,872 |
-| optimizer / Muon | 186.8 | 5.1 | 67 |
-| **fp4 quantize, forward** (`four_six`) | 114.8 | 3.2 | 2,057 |
-| **fp4 requantize, bwd** (`rht128_requant`) | 104.2 | 2.9 | 3,872 |
-| **fp4 scale conversion** (`eden_convert_scales`) | 35.3 | 1.0 | 7,744 |
-| memcpy / memset | 11.4 | 0.3 | 8 |
-| GEMM bf16 (unconverted layers) | 2.4 | 0.1 | 719 |
-| other / unclassified | 0.9 | 0.0 | 137 |
+| group                                            | ms/step |    % | n/step |
+|:-------------------------------------------------|--------:|-----:|-------:|
+| GEMM fp4 (block-scaled)                          |   990.1 | 27.2 |  5,808 |
+| pointwise (elementwise, norm, cast)              |   794.0 | 21.8 | 19,611 |
+| reduction (amax / softmax / CE)                  |   584.3 | 16.1 |  5,153 |
+| attention (flash fwd+bwd)                        |   501.3 | 13.8 |  1,280 |
+| **fp4 rotate + quantize, bwd** (`rht128_eden`)   |   314.3 |  8.6 |  3,872 |
+| optimizer / Muon                                 |   186.8 |  5.1 |     67 |
+| **fp4 quantize, forward** (`four_six`)           |   114.8 |  3.2 |  2,057 |
+| **fp4 requantize, bwd** (`rht128_requant`)       |   104.2 |  2.9 |  3,872 |
+| **fp4 scale conversion** (`eden_convert_scales`) |    35.3 |  1.0 |  7,744 |
+| memcpy / memset                                  |    11.4 |  0.3 |      8 |
+| GEMM bf16 (unconverted layers)                   |     2.4 |  0.1 |    719 |
+| other / unclassified                             |     0.9 |  0.0 |    137 |
 
 Three rows are identical across all three arms to within 0.6% — attention (501.3 / 503.9 / 500.4),
 Muon (186.8 / 187.2 / 187.5) and memcpy (11.4) — which is the cross-check that the grouping is
@@ -177,14 +178,14 @@ not moving work between rows. The 2.4 ms bf16 GEMM row is `ve_gate` and `smear_g
 
 The step-level delta decomposes exactly (fp8 4,566.8 − nvfp4 3,639.8 = **927.0 ms**):
 
-| | ms |
-|:---|---:|
-| GEMM: 1,985.8 → 992.5 | **−993.3** |
-| explicit fp4 quantize rows (none in the fp8 arm) | **+568.6** |
-| reduction row: 781.7 → 584.3 | −197.4 |
-| pointwise row: 1,096.9 → 794.0 | −302.9 |
-| attention + Muon + memcpy | ~0 |
-| **net** | **−925.0** (vs −927.0 measured) |
+|                                                  |                              ms |
+|:-------------------------------------------------|--------------------------------:|
+| GEMM: 1,985.8 → 992.5                            |                      **−993.3** |
+| explicit fp4 quantize rows (none in the fp8 arm) |                      **+568.6** |
+| reduction row: 781.7 → 584.3                     |                          −197.4 |
+| pointwise row: 1,096.9 → 794.0                   |                          −302.9 |
+| attention + Muon + memcpy                        |                              ~0 |
+| **net**                                          | **−925.0** (vs −927.0 measured) |
 
 Two things follow, and the second is the surprising one.
 
@@ -205,7 +206,8 @@ opaque `custom_op` that leaves the producer writing plain bf16. So the two recip
 quantization in different columns, and the honest comparison is the sum of everything that is
 not GEMM, attention, Muon or memcpy: bf16 pays 1,322.4 ms, fp8 pays 1,878.6, and fp4 pays
 1,946.9. **So both quantized recipes add ~560–625 ms of glue over bf16, and fp4's is ~68 ms/step
-*more* expensive than fp8's — not less, despite moving half the bytes.** That is the headroom, and it is why "fuse the cast into
+*more* expensive than fp8's — not less, despite moving half the bytes.** That is the headroom, and it is why "fuse the
+cast into
 its producer" is the item this map supports most strongly.
 
 ### The amax pre-pass is 148 ms/step
@@ -214,11 +216,11 @@ its producer" is the item this map supports most strongly.
 NVFP4's per-tensor scale must be known before the kernel runs. Inductor fuses that reduction into
 the producer, so it is not a separate kernel — but it is measurable by name:
 
-| arm | kernels mentioning `linalg_vector_norm` | launches |
-|---|---:|---:|
-| nvfp4 | 204.4 ms/step | 2,644 |
-| fp8 | 56.0 | 52 |
-| bf16 | 56.0 | 52 |
+| arm   | kernels mentioning `linalg_vector_norm` | launches |
+|-------|----------------------------------------:|---------:|
+| nvfp4 |                           204.4 ms/step |    2,644 |
+| fp8   |                                    56.0 |       52 |
+| bf16  |                                    56.0 |       52 |
 
 **~148 ms/step (4.1%) is the fp4 amax pre-pass.** Treat it as an upper bound on what a
 TransformerEngine-style delayed-scaling recipe would save: those kernels compute other things
@@ -231,12 +233,12 @@ producer → amax → quantize serialization that the number does not capture.
 `perf-log.md` experiment 5 rejected CUDA graphs at the fp8 launch count, and the fp4 arm issues
 **58,573 GPU ops/step against fp8's 34,357**.
 
-| | nvfp4 | fp8 |
-|---|---:|---:|
-| GPU ops/step | 58,573 | 34,357 |
-| GPU busy | **98.73%** | 99.51% |
-| sub-2 us gaps (launch-shaped) | 0.724% of window | 0.261% |
-| median inter-kernel gap | 0.35 us | 0.35 us |
+|                               |            nvfp4 |     fp8 |
+|-------------------------------|-----------------:|--------:|
+| GPU ops/step                  |           58,573 |  34,357 |
+| GPU busy                      |       **98.73%** |  99.51% |
+| sub-2 us gaps (launch-shaped) | 0.724% of window |  0.261% |
+| median inter-kernel gap       |          0.35 us | 0.35 us |
 
 **The verdict holds: the step is GPU-bound and any CUDA-graph or launch-batching win is capped at
 0.72% of wall clock** (~26.7 ms/step), before graphs' own costs. The card is 0.8 points less busy
@@ -244,12 +246,12 @@ than under fp8, not launch-starved.
 
 The host side is where the fp4 path is visibly untidy, without it yet mattering:
 
-| API | ms/step | calls/step |
-|---|---:|---:|
-| `cudaStreamSynchronize` | 880.6 | 17 |
-| `cuLaunchKernel` | 394.9 | 22,777 |
-| `cudaLaunchKernel` | 310.4 | 13,967 |
-| **`cudaMemset`** | **296.7** | **7,744** |
+| API                     |   ms/step | calls/step |
+|-------------------------|----------:|-----------:|
+| `cudaStreamSynchronize` |     880.6 |         17 |
+| `cuLaunchKernel`        |     394.9 |     22,777 |
+| `cudaLaunchKernel`      |     310.4 |     13,967 |
+| **`cudaMemset`**        | **296.7** |  **7,744** |
 
 That `cudaMemset` row is the per-call `cudaMemset(max_scale, 0, 4)` in the eden and requant
 launchers — 7,744 calls at 38 us of CPU each, 13% of all API time, zeroing four bytes. Net CPU
@@ -264,14 +266,14 @@ step, so there is 2.7x headroom and none of this is on the critical path today �
 SM% and DRAM% means latency- or occupancy-bound, i.e. a fusion or launch-geometry problem; high
 DRAM% means the only lever is moving fewer bytes.
 
-| kernel | % GPU | SM % | DRAM % | limited by |
-|:---|---:|---:|---:|:---|
-| `cutlass3x_...block_scaled` (fp4 GEMM) | 27.2 | 66.3 | 19.9 | compute, with 34 points spare |
-| `four_six_fp4_kernel` (fwd quantize) | 3.2 | 46.0 | **85.0** | **bandwidth, near roofline** |
-| `rht128_eden_tma_kernel<false>` (bwd) | 5.2 | 27.4 | **76.5** | **bandwidth** |
-| `rht128_eden_tma_kernel<true>` (bwd, transposed) | 3.5 | 26.2 | **77.7** | **bandwidth** |
-| `rht128_requant_kernel` (bwd) | 2.9 | 38.8 | 32.7 | **neither — latency/occupancy** |
-| `gemm_64x64_32x6` (Muon Newton-Schulz) | 3.1 | 63.3 | 18.8 | compute |
+| kernel                                           | % GPU | SM % |   DRAM % | limited by                      |
+|:-------------------------------------------------|------:|-----:|---------:|:--------------------------------|
+| `cutlass3x_...block_scaled` (fp4 GEMM)           |  27.2 | 66.3 |     19.9 | compute, with 34 points spare   |
+| `four_six_fp4_kernel` (fwd quantize)             |   3.2 | 46.0 | **85.0** | **bandwidth, near roofline**    |
+| `rht128_eden_tma_kernel<false>` (bwd)            |   5.2 | 27.4 | **76.5** | **bandwidth**                   |
+| `rht128_eden_tma_kernel<true>` (bwd, transposed) |   3.5 | 26.2 | **77.7** | **bandwidth**                   |
+| `rht128_requant_kernel` (bwd)                    |   2.9 | 38.8 |     32.7 | **neither — latency/occupancy** |
+| `gemm_64x64_32x6` (Muon Newton-Schulz)           |   3.1 | 63.3 |     18.8 | compute                         |
 
 The two `rht128_eden` variants are drilled **separately**: they share a name, so one ncu sample
 cannot speak for both, and the report now suppresses the columns rather than guessing (see
@@ -328,10 +330,10 @@ layers (2.4 ms), and any arithmetic rewrite of the forward cast (it is at the by
 Two `at::native::vectorized_elementwise_kernel` rows carry **208.4 ms/step (5.7%)**, identical in
 all three arms:
 
-| functor | ms/step | n/step | med |
-|:---|---:|---:|---:|
-| `CUDAFunctor_add<float>` | 135.7 | 2,040 | 34.0 us |
-| `CUDAFunctor_add<BFloat16>` | 72.7 | 165 | 440.6 us |
+| functor                     | ms/step | n/step |      med |
+|:----------------------------|--------:|-------:|---------:|
+| `CUDAFunctor_add<float>`    |   135.7 |  2,040 |  34.0 us |
+| `CUDAFunctor_add<BFloat16>` |    72.7 |    165 | 440.6 us |
 
 They are plain adds, and the launch counts identify them: `2,040 = 136 params x 15`, and
 `165 = 11 x 15`, where 15 is `grad_accum - 1` — the micro-steps on which `AccumulateGrad` has an
@@ -364,11 +366,11 @@ algorithm.** `scripts/probe_fp4_gemm.py` autotunes every GEMM the model launches
 inventory, each Linear shape x its three GEMMs x 16 micro-steps, which reproduces the profile's
 5,808 launches/step — against `_scaled_mm` on the same warm card:
 
-| | GEMM row, ms/step |
-|---|---:|
-| `torch._scaled_mm` | 987.1 |
-| this fork's launcher, 1 MiB workspace (torch's budget) | 987.7 |
-| this fork's launcher, 32 MiB, best candidate per shape | **985.8** |
+|                                                        | GEMM row, ms/step |
+|--------------------------------------------------------|------------------:|
+| `torch._scaled_mm`                                     |             987.1 |
+| this fork's launcher, 1 MiB workspace (torch's budget) |             987.7 |
+| this fork's launcher, 32 MiB, best candidate per shape |         **985.8** |
 
 **1.001x**, and end to end **0.0%**: 72,707 tok/s against 72,693 for the same recipe without the
 flag, with the reference repeat at 72,663 — a 0.04% spread, so the null is tight rather than
@@ -416,11 +418,11 @@ Four things worth not rediscovering:
 device-pointer alpha, so `out * alpha` never runs. **+0.35%**, and a real if small numerics
 improvement. Batched arms, d20/dbs 4, 2 GPUs, medians of steps 15-19:
 
-| arm | tok/s |
-|---|---:|
-| `--nvfp4-lt-gemm` | 72,823 |
+| arm                        |      tok/s |
+|----------------------------|-----------:|
+| `--nvfp4-lt-gemm`          |     72,823 |
 | `+ --nvfp4-epilogue-alpha` | **73,079** |
-| `--nvfp4-lt-gemm` (repeat) | 72,773 |
+| `--nvfp4-lt-gemm` (repeat) |     72,773 |
 
 A 0.07% reference spread, so +0.35% is five times the noise floor, and the alpha arm is ahead of
 both reference arms at every one of the five step indices.
@@ -428,11 +430,11 @@ both reference arms at every one of the five step indices.
 **The profile says the mechanism is not the one the queue assumed, and the difference matters.**
 Matched captures (1 GPU, 3 steps, same config) put the step at 3,635.6 → 3,615.6 ms, **−20.0 ms**:
 
-| group | ms/step | n/step |
-|:---|---:|---:|
-| GEMM fp4 | 981.6 → 981.6 | 5,808 → 5,808 |
+| group     |           ms/step |              n/step |
+|:----------|------------------:|--------------------:|
+| GEMM fp4  |     981.6 → 981.6 |       5,808 → 5,808 |
 | pointwise | 795.6 → **784.3** | 19,611 → **24,939** |
-| reduction | 583.8 → **573.8** | 5,153 → 5,153 |
+| reduction | 583.8 → **573.8** |       5,153 → 5,153 |
 
 The epilogue costs the GEMM nothing — that row does not move by 0.1 ms. But the pointwise row gets
 *faster while gaining 5,328 launches*, which only makes sense once the per-kernel diff is read:
@@ -458,12 +460,12 @@ bf16 **once** where the separate multiply rounds and then scales, so against the
 product of the dequantized operands it is **1.3-1.6x lower relative MSE** — real, structural, and
 true at every shape. But put that term in the actual budget:
 
-| rel MSE, against the fp32 product of the *unquantized* operands | |
-|:---|---:|
-| fp4 quantization of the operands | 1.51e-2 |
-| output rounding, two roundings (separate multiply) | ~1.1e-5 |
-| output rounding, one (epilogue) | ~7.9e-6 |
-| **improvement in total GEMM error** | **0.00-0.11%** |
+| rel MSE, against the fp32 product of the *unquantized* operands |                |
+|:----------------------------------------------------------------|---------------:|
+| fp4 quantization of the operands                                |        1.51e-2 |
+| output rounding, two roundings (separate multiply)              |        ~1.1e-5 |
+| output rounding, one (epilogue)                                 |        ~7.9e-6 |
+| **improvement in total GEMM error**                             | **0.00-0.11%** |
 
 Quantization dominates the rounding by ~1,500x, so A2 moves the total error by a tenth of a
 percent. **Nothing this small can show up in bpb**, and it should not be argued as a reason to
@@ -494,11 +496,11 @@ inside the GEMM instead of being written bf16 for autograd to widen and add. **+
 largest single item measured on this branch, against the tightest reference this file has. Batched
 arms, d20/dbs 4, 2 GPUs, grad-accum 16, medians of steps 15-19:
 
-| arm | tok/s | MFU | peak |
-|---|---:|---:|---:|
-| `--nvfp4-lt-gemm --nvfp4-epilogue-alpha` | 73,209 | 47.70 | 19,587 MiB |
-| `+ --nvfp4-fuse-wgrad` | **76,193** | **49.64** | **19,421 MiB** |
-| `--nvfp4-lt-gemm --nvfp4-epilogue-alpha` (repeat) | 73,220 | 47.70 | 19,587 MiB |
+| arm                                               |      tok/s |       MFU |           peak |
+|---------------------------------------------------|-----------:|----------:|---------------:|
+| `--nvfp4-lt-gemm --nvfp4-epilogue-alpha`          |     73,209 |     47.70 |     19,587 MiB |
+| `+ --nvfp4-fuse-wgrad`                            | **76,193** | **49.64** | **19,421 MiB** |
+| `--nvfp4-lt-gemm --nvfp4-epilogue-alpha` (repeat) |     73,220 |     47.70 |     19,587 MiB |
 
 The two reference arms agree to **0.015%**, so this is 270x the noise floor, and the fused arm's
 *slowest* step (76,056) beats the references' fastest (73,289). It also **costs 166 MiB less**
@@ -509,11 +511,11 @@ that is not explained here; it is reproducible and small, so it is recorded rath
 **The profile confirms the mechanism the queue asked it to confirm.** Matched captures (1 GPU,
 3 steps, same config) put the step at 3,610.4 → 3,472.7 ms, **−137.7 ms**:
 
-| group | ms/step | n/step |
-|:---|---:|---:|
-| GEMM fp4 | 979.1 → **1,024.1** | 5,808 → 5,808 |
-| pointwise | 783.9 → **613.9** | 24,939 → **21,189** |
-| `CUDAFunctor_add<float>` (inside pointwise) | 135.6 → **0.4** | 2,040 → **225** |
+| group                                       |             ms/step |              n/step |
+|:--------------------------------------------|--------------------:|--------------------:|
+| GEMM fp4                                    | 979.1 → **1,024.1** |       5,808 → 5,808 |
+| pointwise                                   |   783.9 → **613.9** | 24,939 → **21,189** |
+| `CUDAFunctor_add<float>` (inside pointwise) |     135.6 → **0.4** |     2,040 → **225** |
 
 The add row does not shrink, it **goes away**: the 225 launches left are `15 params x 15
 micro-steps`, the fp32 parameters that are not NVFP4 Linears and still accumulate the old way.
@@ -577,18 +579,18 @@ step 99 (`dev-ignore/fp4-scaling/`). `ga` 32-on-1 vs 16-on-2 holds work per step
 `tok_per_sec = total_batch_size / dt` (`base_train.py:683`) is global, so the ratio is the
 strong-scaling factor directly:
 
-| arm | start C | tok/s @99 | MFU | dt/step |
-|---|---:|---:|---:|---:|
-| `--nvfp4` 2 GPU | 36 | 232,678 | 39.90% | 2253.3 ms |
-| `--nvfp4` 2 GPU (repeat) | 40 | 231,885 | 39.77% | 2261.0 ms |
-| `--fp8` 2 GPU | 40 | 193,025 | 33.10% | 2716.2 ms |
-| `--nvfp4` 1 GPU | 39 | 118,180 | 40.53% | 4436.3 ms |
-| `--fp8` 1 GPU | 40 | 97,778 | 33.54% | 5362.0 ms |
+| arm                      | start C | tok/s @99 |    MFU |   dt/step |
+|--------------------------|--------:|----------:|-------:|----------:|
+| `--nvfp4` 2 GPU          |      36 |   232,678 | 39.90% | 2253.3 ms |
+| `--nvfp4` 2 GPU (repeat) |      40 |   231,885 | 39.77% | 2261.0 ms |
+| `--fp8` 2 GPU            |      40 |   193,025 | 33.10% | 2716.2 ms |
+| `--nvfp4` 1 GPU          |      39 |   118,180 | 40.53% | 4436.3 ms |
+| `--fp8` 1 GPU            |      40 |    97,778 | 33.54% | 5362.0 ms |
 
-| | scaling 2g/1g | comms tax |
-|---|---:|---:|
-| `--fp8` | **1.974x** | **1.29%** |
-| `--nvfp4` | **1.962x** | **1.89%** |
+|           | scaling 2g/1g | comms tax |
+|-----------|--------------:|----------:|
+| `--fp8`   |    **1.974x** | **1.29%** |
+| `--nvfp4` |    **1.962x** | **1.89%** |
 
 **The tax roughly doubles in relative terms and is still under 2%.** fp8's 1.29% scaled by fp4's
 1.209x single-GPU speedup predicts **1.56%**; the two fp4 2-GPU arms bracket that at 1.56% (cold
@@ -612,14 +614,14 @@ kernels sit at 76-85% of the DRAM roofline (*Where the time goes*), which is que
 
 Measured with `--window-pattern L --nvfp4`, eval + sampling + checkpointing all on, 4 steps:
 
-| depth | dbs | peak | headroom | tok/s | MFU |
-|---|---|---|---|---|---|
-| d12 | 8 | 10,427 MiB | 14.0 GiB | 99,593 | 39.9% |
-| d20 | 2 | 13,105 | 11.4 GiB | 28,612 | 41.9% |
+| depth   | dbs   | peak       | headroom    | tok/s      | MFU       |
+|---------|-------|------------|-------------|------------|-----------|
+| d12     | 8     | 10,427 MiB | 14.0 GiB    | 99,593     | 39.9%     |
+| d20     | 2     | 13,105     | 11.4 GiB    | 28,612     | 41.9%     |
 | **d20** | **4** | **16,796** | **7.7 GiB** | **31,011** | **45.4%** |
-| d20 | 8 | OOM | — | — | — |
-| d24 | 2 | 21,129 | 3.3 GiB | 18,260 | 43.6% |
-| d24 | 4 | OOM | — | — | — |
+| d20     | 8     | OOM        | —           | —          | —         |
+| d24     | 2     | 21,129     | 3.3 GiB     | 18,260     | 43.6%     |
+| d24     | 4     | OOM        | —           | —          | —         |
 
 **d24 does complete end to end at dbs 2** — full loop, validation descending, model and optimizer
 checkpoints written. perf-log.md's "d24 does not fit here at any batch size" is too strong; what
@@ -644,10 +646,10 @@ step instead.
 
 d20 dbs=4, batched arms with the reference repeated (`scripts/arm_batch.sh`), run twice independently:
 
-| run | no cache | cache | no cache (repeat) | repeat spread | delta |
-|---|---|---|---|---|---|
-| first | 30,877 | **31,476** | 30,824 | 0.17% | **+2.03%** |
-| second | 30,973 | **31,464** | 30,860 | 0.37% | **+1.77%** |
+| run    | no cache | cache      | no cache (repeat) | repeat spread | delta      |
+|--------|----------|------------|-------------------|---------------|------------|
+| first  | 30,877   | **31,476** | 30,824            | 0.17%         | **+2.03%** |
+| second | 30,973   | **31,464** | 30,860            | 0.37%         | **+1.77%** |
 
 So **+1.8 to +2.0%**. Each run clears its own repeat spread by 5-10x, but neither clears
 perf-log.md's 2% cross-session bar on its own — two independent measurements agreeing in sign and
@@ -675,10 +677,10 @@ attention used to run on SDPA — and `_sdpa_attention` only takes the fast `is_
 when the window spans the sequence. The default `SSSL` puts 3 of every 4 layers on a 512 window
 at Tq=2048, which fell through to a materialized `[2048, 2048]` mask and off flash entirely:
 
-| d24, dbs 2, before the fix | tok/s | MFU |
-|---|---|---|
-| `SSSL` (default) | 12,784 | 21.3% |
-| `L` | 18,362 | 43.8% |
+| d24, dbs 2, before the fix | tok/s  | MFU   |
+|----------------------------|--------|-------|
+| `SSSL` (default)           | 12,784 | 21.3% |
+| `L`                        | 18,362 | 43.8% |
 
 **Fixed 2026-08-18 by porting `perf-log.md` experiment 13's windowed flash** — `sm120/attention.py`
 routes a causal sliding window through `aten::_flash_attention_forward`, which takes
@@ -689,11 +691,11 @@ uses. No new CUDA. Importing `nanochat.sm120` installs it, and `base_train.py` n
 d20 / dbs 4, 1 GPU, `--nvfp4 --nvfp4-weight-cache`, batched arms with the reference repeated,
 tok/s at step 13:
 
-| arm | tok/s | MFU | peak |
-|---|---|---|---|
-| `L` | 34,167 | 49.98% | 16,781 MiB |
-| **`SSSL`** | **36,095** | 47.03% | 16,781 MiB |
-| `L` (repeat) | 34,106 | 49.89% | 16,781 MiB |
+| arm          | tok/s      | MFU    | peak       |
+|--------------|------------|--------|------------|
+| `L`          | 34,167     | 49.98% | 16,781 MiB |
+| **`SSSL`**   | **36,095** | 47.03% | 16,781 MiB |
+| `L` (repeat) | 34,106     | 49.89% | 16,781 MiB |
 
 **`SSSL` is +5.7% over `L`**, against a reference repeat spread of 0.18% — so the sign that this
 file recorded was not just wrong in magnitude, it was wrong in direction. The number matches
@@ -716,11 +718,11 @@ the +7.0% figure that headline used to carry remains an underestimate by an unkn
 Token budget is `target_param_data_ratio × (transformer_matrices + lm_head)` — the shard count
 is only the data pool. At speedrun's ratio 8, with the tok/s above:
 
-| depth | scaling params | tokens | shards | runtime |
-|---|---|---|---|---|
-| d12 | 110M | 0.88B | 16 | 2.5 h |
-| d20 | 435M | 3.48B | 65 | 31 h |
-| d24 | 730M | 5.84B | 108 | 89 h (3.7 days) |
+| depth | scaling params | tokens | shards | runtime         |
+|-------|----------------|--------|--------|-----------------|
+| d12   | 110M           | 0.88B  | 16     | 2.5 h           |
+| d20   | 435M           | 3.48B  | 65     | 31 h            |
+| d24   | 730M           | 5.84B  | 108    | 89 h (3.7 days) |
 
 Measured on the local corpus: 252.8M chars/shard at 4.693 chars/token = **~53.9M tokens/shard**,
 so the 170 train shards `runs/speedrun.sh` downloads hold ~9.16B tokens. That sizing matches the
@@ -735,11 +737,11 @@ The kernels need `cuda_fp4.h` intrinsics that lower to `cvt.rn.satfinite.e2m1x2.
 compile `-gencode arch=compute_120a,code=sm_120a` and need **CUDA ≥ 12.8 — not 13.x**. 12.8 is
 the release that added sm_120 and NVFP4 together; nothing in this path requires CUDA 13.
 
-| thing | actually needs |
-|---|---|
-| sm_120 at all | CUDA ≥ 12.8 (the cu128 torch wheel ships native `sm_120`) |
-| NVFP4 `_scaled_mm` | CUDA ≥ 12.8 — verified working on `.venv` (cu128) |
-| compiling these kernels | CUDA ≥ 12.8 |
+| thing                              | actually needs                                            |
+|------------------------------------|-----------------------------------------------------------|
+| sm_120 at all                      | CUDA ≥ 12.8 (the cu128 torch wheel ships native `sm_120`) |
+| NVFP4 `_scaled_mm`                 | CUDA ≥ 12.8 — verified working on `.venv` (cu128)         |
+| compiling these kernels            | CUDA ≥ 12.8                                               |
 | ~~**`.venv-cu130` specifically**~~ | ~~nothing above — only that this box has no 12.x `nvcc`~~ |
 
 **That last row is obsolete: 12.8 is installed now, and `.venv` is the venv to use.** All of A1
@@ -812,16 +814,16 @@ third arm is a **replicate**, needed because `--nvfp4` is not run-to-run reprodu
 weight cache*). Each seed carries its own fp8 reference, so a bad run contaminates one delta
 rather than all eight — the trap experiment 18 lost two flags to.
 
-| seed | fp8 | nvfp4-A | nvfp4-B | delta | replicate |
-|---|---|---|---|---|---|
-| 42 | 1.464083 | 1.477265 | 1.476734 | +0.012916 | 0.000531 |
-| 43 | 1.461437 | 1.481243 | 1.481490 | +0.019929 | 0.000247 |
-| 44 | 1.468248 | 1.479530 | 1.479773 | +0.011404 | 0.000243 |
-| 45 | 1.466406 | 1.457611 | 1.457648 | −0.008777 | 0.000037 |
-| 46 | 1.471653 | 1.462465 | 1.461963 | −0.009439 | 0.000502 |
-| 47 | 1.462397 | 1.475208 | 1.475029 | +0.012722 | 0.000179 |
-| 48 | 1.458821 | 1.478994 | 1.478845 | +0.020099 | 0.000149 |
-| 49 | 1.472422 | 1.460864 | 1.460134 | −0.011923 | 0.000730 |
+| seed | fp8      | nvfp4-A  | nvfp4-B  | delta     | replicate |
+|------|----------|----------|----------|-----------|-----------|
+| 42   | 1.464083 | 1.477265 | 1.476734 | +0.012916 | 0.000531  |
+| 43   | 1.461437 | 1.481243 | 1.481490 | +0.019929 | 0.000247  |
+| 44   | 1.468248 | 1.479530 | 1.479773 | +0.011404 | 0.000243  |
+| 45   | 1.466406 | 1.457611 | 1.457648 | −0.008777 | 0.000037  |
+| 46   | 1.471653 | 1.462465 | 1.461963 | −0.009439 | 0.000502  |
+| 47   | 1.462397 | 1.475208 | 1.475029 | +0.012722 | 0.000179  |
+| 48   | 1.458821 | 1.478994 | 1.478845 | +0.020099 | 0.000149  |
+| 49   | 1.472422 | 1.460864 | 1.460134 | −0.011923 | 0.000730  |
 
 **mean +0.005866 ± 0.009610 (2 sem), band −0.0037 .. +0.0155, signs 5+/3−.** The band spans zero,
 so `--nvfp4` **clears** — and it survives the heavy-tail check that matters here: leave-one-out
@@ -854,10 +856,10 @@ experiment.
 rather than `--num-iterations` — the LR schedule derives from it, so this is a different
 experiment from C1, not a longer one.
 
-| seed | fp8 | nvfp4 | delta | fp8 CORE | nvfp4 CORE | CORE delta |
-|---|---|---|---|---|---|---|
-| 42 | 0.833421 | 0.847110 | **+0.013689** | 0.1543 | 0.1317 | −0.0226 |
-| 43 | 0.833425 | 0.847187 | **+0.013762** | 0.1501 | 0.1488 | −0.0013 |
+| seed | fp8      | nvfp4    | delta         | fp8 CORE | nvfp4 CORE | CORE delta |
+|------|----------|----------|---------------|----------|------------|------------|
+| 42   | 0.833421 | 0.847110 | **+0.013689** | 0.1543   | 0.1317     | −0.0226    |
+| 43   | 0.833425 | 0.847187 | **+0.013762** | 0.1501   | 0.1488     | −0.0013    |
 
 **The two seeds agree on the deficit to 7e-5**, and the fp8 arms agree to 4e-6 — the sharpest
 measurement in either log. The paired deficit is monotone from step 500 and **still widening at
@@ -899,13 +901,13 @@ d12 / dbs 8 / 2 GPU / seed 42, C2's protocol exactly (`--total-batch-size 524288
 sibling checkout** (`sm120_nanochat`, branch `quartet-te`) which has no `nvfp4_numerics.py` — its
 constants are a cross-tree reference, not a within-tree one.
 
-| arm | flags beyond the base | bpb | min |
-|---|---|---|---|
-| `fp8-w65` | `--fp8` | **0.833176** | 112.35m |
-| `nvfp4-plain-w65` | `--nvfp4` | **0.846993** | 94.05m |
-| `nvfp4-recipe-w65` | `+ --nvfp4-exclude lm_head --nvfp4-exclude-precision fp8-fwd` | **0.844619** | 95.83m |
-| `fp8-w20` | `--fp8 --warmdown-ratio 0.2` | **0.840602** | 112.21m |
-| `nvfp4-recipe-w20` | recipe `+ --warmdown-ratio 0.2` | **0.853487** | 95.83m |
+| arm                | flags beyond the base                                         | bpb          | min     |
+|--------------------|---------------------------------------------------------------|--------------|---------|
+| `fp8-w65`          | `--fp8`                                                       | **0.833176** | 112.35m |
+| `nvfp4-plain-w65`  | `--nvfp4`                                                     | **0.846993** | 94.05m  |
+| `nvfp4-recipe-w65` | `+ --nvfp4-exclude lm_head --nvfp4-exclude-precision fp8-fwd` | **0.844619** | 95.83m  |
+| `fp8-w20`          | `--fp8 --warmdown-ratio 0.2`                                  | **0.840602** | 112.21m |
+| `nvfp4-recipe-w20` | recipe `+ --warmdown-ratio 0.2`                               | **0.853487** | 95.83m  |
 
 **The parity check passes.** The plain deficit reproduces at **+0.013817** against C2's +0.013689
 (s42) and +0.013762 (s43), and the trajectory tracks C2 step for step: +0.0090 / +0.0105 / +0.0119
@@ -916,12 +918,12 @@ cross-tree drift, ~60x C2's 4e-6 fp8 seed spread, and visible at step 2 as 10.36
 
 ### The four pairings
 
-| pair | delta | reading |
-|---|---|---|
-| recipe w65 − fp8 w65 | **+0.011443** | the recipe closes 17% of the deficit and leaves 83% |
-| recipe w65 − plain w65 | **−0.002374** | the recipe's gain in isolation |
-| fp8 w20 − fp8 w65 | **+0.007426** | 80/20 costs fp8 three times what the recipe buys |
-| recipe w20 − fp8 w20 | **+0.012885** | the deficit is *worse* under NVIDIA's schedule |
+| pair                   | delta         | reading                                             |
+|------------------------|---------------|-----------------------------------------------------|
+| recipe w65 − fp8 w65   | **+0.011443** | the recipe closes 17% of the deficit and leaves 83% |
+| recipe w65 − plain w65 | **−0.002374** | the recipe's gain in isolation                      |
+| fp8 w20 − fp8 w65      | **+0.007426** | 80/20 costs fp8 three times what the recipe buys    |
+| recipe w20 − fp8 w20   | **+0.012885** | the deficit is *worse* under NVIDIA's schedule      |
 
 **The recipe shifts the curve, it does not flatten it** — the distinction that decides what the
 result means. Its gain is flat across training (0.0036 / 0.0026 / 0.0027 / 0.0020 / 0.0022 at
@@ -969,7 +971,8 @@ forwards, which is where C5 says the cost actually is, unlike the lm_head exclus
 delayed` and `--nvfp4-bwd-source bf16` are backward-side and C5 gives no reason to expect them to
 move a forward-noise deficit.~~ **That dismissal assumed its conclusion** — see *Numerics: C6*,
 which shows `fp8-fwd` changes the backward operand source as well as the forward precision, so C5
-never isolated the forward at all. ~~**Value-level stochastic rounding in the forward is the lever this points at**~~ — the target was
+never isolated the forward at all. ~~**Value-level stochastic rounding in the forward is the lever this points at**~~ —
+the target was
 right, the ranking was not: *Numerics: C8* prices the forward at −0.0132 and puts the
 **Hadamard-rotated forward** ahead of SR (free, existing kernels, no bias/variance tradeoff).
 
@@ -981,10 +984,10 @@ exchange rate on either list.
 **2 arms at the ratio-12 horizon (2,520 steps), 2026-09-03, `dev-ignore/overnight/c6/`.**
 C5's protocol exactly, so both pair against c5 arms in the same tree and session.
 
-| arm | flags beyond the base | bpb | vs `c5-fp8-w65` | min | peak |
-|---|---|---|---|---|---|
-| `fp8-delayed-nt-w65` | `--fp8 --fp8-scaling delayed --wgrad-nt` | **0.833571** | **+0.000395** | 95.46 | 10.6 GB |
-| `nvfp4-recipe-blocks24-w65` | recipe `+ --nvfp4-bf16-blocks 2,4` | **0.841941** | **+0.008765** | 100.09 | 11.5 GB |
+| arm                         | flags beyond the base                    | bpb          | vs `c5-fp8-w65` | min    | peak    |
+|-----------------------------|------------------------------------------|--------------|-----------------|--------|---------|
+| `fp8-delayed-nt-w65`        | `--fp8 --fp8-scaling delayed --wgrad-nt` | **0.833571** | **+0.000395**   | 95.46  | 10.6 GB |
+| `nvfp4-recipe-blocks24-w65` | recipe `+ --nvfp4-bf16-blocks 2,4`       | **0.841941** | **+0.008765**   | 100.09 | 11.5 GB |
 
 ### Delayed fp8 scaling plus NT wgrad is free — and that is the headline
 
@@ -1003,12 +1006,12 @@ though this raises the prior that it too is cheap.
 **The consequence for NVFP4 is the real result.** The fp8 baseline is now faster than every NVFP4
 arm on record at d12:
 
-| config | min | vs best fp8 | bpb deficit |
-|---|---|---|---|
-| `fp8-delayed-nt` | 95.46 | — | — |
-| `nvfp4-plain` | 94.05 | 1.015x | +0.0138 |
-| `nvfp4-recipe` | 95.83 | 0.996x | +0.0114 |
-| `nvfp4-recipe-blocks24` | 100.09 | 0.954x | +0.0088 |
+| config                  | min    | vs best fp8 | bpb deficit |
+|-------------------------|--------|-------------|-------------|
+| `fp8-delayed-nt`        | 95.46  | —           | —           |
+| `nvfp4-plain`           | 94.05  | 1.015x      | +0.0138     |
+| `nvfp4-recipe`          | 95.83  | 0.996x      | +0.0114     |
+| `nvfp4-recipe-blocks24` | 100.09 | 0.954x      | +0.0088     |
 
 **C2's "break-even at equal wall clock" does not survive.** That verdict rested on NVFP4 being
 1.199x faster, buying ~500 extra steps to spend on the deficit. Against an optimized fp8 the
@@ -1030,10 +1033,10 @@ The trajectory is what distinguishes it from C5. The recipe's gain was flat; thi
 (−0.0002 at step 250, −0.0012 at 750, −0.0024 at 1500, −0.0028 at 2500), and the deficit's growth
 rate is roughly halved:
 
-| arm | deficit @250 | @2520 | growth |
-|---|---|---|---|
-| plain | +0.006221 | +0.013817 | +0.007596 |
-| recipe | +0.005261 | +0.011443 | +0.006182 |
+| arm              | deficit @250  | @2520         | growth        |
+|------------------|---------------|---------------|---------------|
+| plain            | +0.006221     | +0.013817     | +0.007596     |
+| recipe           | +0.005261     | +0.011443     | +0.006182     |
 | **+ blocks 2,4** | **+0.005041** | **+0.008765** | **+0.003724** |
 
 Halving the fp4 block count roughly halves the growth. A two-point linear fit gives ~0.00042 per
@@ -1075,13 +1078,13 @@ Designed to break C5/C6's confound: it changes only where the backward's fp4 ope
 quantized *from*, leaving the forward bit-identical — verified, step-0 loss 10.397527 matches
 plain NVFP4 exactly.
 
-| arm | bpb | deficit vs fp8 | growth 250->2520 |
-|---|---|---|---|
-| `c5-fp8-w65` | 0.833176 | — | — |
-| `c5-nvfp4-plain-w65` | 0.846993 | +0.013817 | +0.007596 |
-| `c5-nvfp4-recipe-w65` | 0.844619 | +0.011443 | +0.006182 |
-| `c6-...-blocks24-w65` | 0.841941 | +0.008765 | +0.003724 |
-| **`c7-nvfp4-bwdbf16-w65`** | **0.853135** | **+0.019959** | **+0.012614** |
+| arm                        | bpb          | deficit vs fp8 | growth 250->2520 |
+|----------------------------|--------------|----------------|------------------|
+| `c5-fp8-w65`               | 0.833176     | —              | —                |
+| `c5-nvfp4-plain-w65`       | 0.846993     | +0.013817      | +0.007596        |
+| `c5-nvfp4-recipe-w65`      | 0.844619     | +0.011443      | +0.006182        |
+| `c6-...-blocks24-w65`      | 0.841941     | +0.008765      | +0.003724        |
+| **`c7-nvfp4-bwdbf16-w65`** | **0.853135** | **+0.019959**  | **+0.012614**    |
 
 **It is 44% worse than plain NVFP4** (+0.0200 against +0.0138), and the damage is in the
 compounding term: growth two-thirds *higher* than plain, the mirror image of blocks-2,4 halving
@@ -1112,9 +1115,9 @@ construction. That is tautological, not evidence.
 
 **The fp4 backward's own contribution to the deficit.** The 2x2 is:
 
-| | fp4-source bwd | bf16-source bwd |
-|---|---|---|
-| fp4 forward | plain, +0.0138 | **C7, +0.0200** |
+|             | fp4-source bwd  | bf16-source bwd |
+|-------------|-----------------|-----------------|
+| fp4 forward | plain, +0.0138  | **C7, +0.0200** |
 | fp8 forward | not expressible | **C8, +0.0067** |
 
 Every cell runs fp4 backward GEMMs, and "fp8 forward with the fp4-source backward" cannot be
@@ -1141,14 +1144,14 @@ varies the forward GEMM precision and nothing else** — the isolation C5 and C6
 because `fp8-fwd` couples the two. Verified at startup: step-0 loss 10.397516, the fp8 value, not
 NVFP4's 10.397527.
 
-| arm | bpb | deficit vs fp8 | growth 250->2520 | fp4 block forwards |
-|---|---|---|---|---|
-| `c5-fp8-w65` | 0.833176 | — | — | — |
-| `c5-nvfp4-plain-w65` | 0.846993 | +0.013817 | +0.007596 | 12 |
-| `c5-nvfp4-recipe-w65` | 0.844619 | +0.011443 | +0.006182 | 12 |
-| `c6-...-blocks24-w65` | 0.841941 | +0.008765 | +0.003724 | 6 |
-| `c7-nvfp4-bwdbf16-w65` | 0.853135 | +0.019959 | +0.012614 | 12 |
-| **`c8-nvfp4-fp8fwd-all-w65`** | **0.839906** | **+0.006730** | **+0.003300** | **0** |
+| arm                           | bpb          | deficit vs fp8 | growth 250->2520 | fp4 block forwards |
+|-------------------------------|--------------|----------------|------------------|--------------------|
+| `c5-fp8-w65`                  | 0.833176     | —              | —                | —                  |
+| `c5-nvfp4-plain-w65`          | 0.846993     | +0.013817      | +0.007596        | 12                 |
+| `c5-nvfp4-recipe-w65`         | 0.844619     | +0.011443      | +0.006182        | 12                 |
+| `c6-...-blocks24-w65`         | 0.841941     | +0.008765      | +0.003724        | 6                  |
+| `c7-nvfp4-bwdbf16-w65`        | 0.853135     | +0.019959      | +0.012614        | 12                 |
+| **`c8-nvfp4-fp8fwd-all-w65`** | **0.839906** | **+0.006730**  | **+0.003300**    | **0**              |
 
 ### The forward main effect is −0.0132, and it compounds
 
@@ -1162,11 +1165,11 @@ That settles what C5 asked and could not isolate: the cost is the fp4 forward. N
 
 ### Growth rate is roughly proportional to fp4 forward count
 
-| fp4 block forwards | arm | growth |
-|---|---|---|
-| 12 | plain | +0.007596 |
-| 6 | blocks 2,4 | +0.003724 |
-| 0 | C8 | +0.003300 |
+| fp4 block forwards | arm        | growth    |
+|--------------------|------------|-----------|
+| 12                 | plain      | +0.007596 |
+| 6                  | blocks 2,4 | +0.003724 |
+| 0                  | C8         | +0.003300 |
 
 C6's two-point fit predicted ~0.0012 at zero blocks; C8 came in at 0.0033. The overshoot is
 plausibly the bf16-source backward C8 carries — C7 shows that lever alone raises growth from
@@ -1208,15 +1211,15 @@ unless it is a batched-arm A/B (`scripts/arm_batch.sh`, reference repeated).
 
 ### A. No numerics gate — land these first
 
-| # | item | measured price | depends on | size |
-|---|---|---|---|---|
-| ~~**A1**~~ | ~~cuBLASLt path for the three fp4 GEMMs~~ — **done 2026-08-18, `--nvfp4-lt-gemm`** | **1.001x on the GEMM row, 0.0% end to end** — one kernel, no algorithm to choose. It lands as the seam only, and A2/A3 are unblocked | — | L |
-| ~~**A2**~~ | ~~per-tensor scale as device-pointer alpha~~ — **done 2026-08-18, `--nvfp4-epilogue-alpha`** | **+0.35%** (0.07% spread) and one bf16 rounding fewer. The `[M, N]` pass it "deletes" turned out to be fused already; what it wins is ~27 ms of ALU, less 6.9 ms of new alpha products | A1 | S |
-| **A2b** | **Produce `a_ts * b_ts` without a kernel per GEMM** — have a quantize kernel store the product it already has the inputs for | **6.9 ms/step and 5,808 launches**, i.e. roughly doubles A2 | A2 | S |
-| ~~**A3**~~ | ~~fused wgrad accumulation, `beta=1` into an fp32 `main_grad`~~ — **done 2026-08-18, `--nvfp4-fuse-wgrad`** | **+4.07%** (0.015% spread), −166 MiB peak. The `CUDAFunctor_add<float>` row goes 135.6 → 0.4 ms, its widening casts take another 34.8, and the fp32 epilogue gives 45.0 back on the GEMM row | A1 | M |
-| **A4** | **QKV quantize dedup** — `c_q`/`c_k`/`c_v` quantize the same `x` three times, and requantize it three times in the backward | 2 of 3 forward quantizes and 2 of 3 backward requants per attention block | — | M |
-| **A5** | **`rht128_requant` occupancy** — 38.8% SM against 32.7% DRAM is idle on both roofs | 104.2 ms/step (2.9%) | — | M |
-| **A6** | **Launcher hygiene** — current stream instead of the legacy default, hoist the per-call `cudaGetDevice`/`cudaFuncSetAttribute`/occupancy query, `cudaMemsetAsync` | 296.7 ms/step of CPU, but **0% of wall clock today** (GPU 98.73% busy). Do it for CUDA-graph capture and future headroom, not for throughput | — | S |
+| #          | item                                                                                                                                                              | measured price                                                                                                                                                                               | depends on | size |
+|------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------|------|
+| ~~**A1**~~ | ~~cuBLASLt path for the three fp4 GEMMs~~ — **done 2026-08-18, `--nvfp4-lt-gemm`**                                                                                | **1.001x on the GEMM row, 0.0% end to end** — one kernel, no algorithm to choose. It lands as the seam only, and A2/A3 are unblocked                                                         | —          | L    |
+| ~~**A2**~~ | ~~per-tensor scale as device-pointer alpha~~ — **done 2026-08-18, `--nvfp4-epilogue-alpha`**                                                                      | **+0.35%** (0.07% spread) and one bf16 rounding fewer. The `[M, N]` pass it "deletes" turned out to be fused already; what it wins is ~27 ms of ALU, less 6.9 ms of new alpha products       | A1         | S    |
+| **A2b**    | **Produce `a_ts * b_ts` without a kernel per GEMM** — have a quantize kernel store the product it already has the inputs for                                      | **6.9 ms/step and 5,808 launches**, i.e. roughly doubles A2                                                                                                                                  | A2         | S    |
+| ~~**A3**~~ | ~~fused wgrad accumulation, `beta=1` into an fp32 `main_grad`~~ — **done 2026-08-18, `--nvfp4-fuse-wgrad`**                                                       | **+4.07%** (0.015% spread), −166 MiB peak. The `CUDAFunctor_add<float>` row goes 135.6 → 0.4 ms, its widening casts take another 34.8, and the fp32 epilogue gives 45.0 back on the GEMM row | A1         | M    |
+| **A4**     | **QKV quantize dedup** — `c_q`/`c_k`/`c_v` quantize the same `x` three times, and requantize it three times in the backward                                       | 2 of 3 forward quantizes and 2 of 3 backward requants per attention block                                                                                                                    | —          | M    |
+| **A5**     | **`rht128_requant` occupancy** — 38.8% SM against 32.7% DRAM is idle on both roofs                                                                                | 104.2 ms/step (2.9%)                                                                                                                                                                         | —          | M    |
+| **A6**     | **Launcher hygiene** — current stream instead of the legacy default, hoist the per-call `cudaGetDevice`/`cudaFuncSetAttribute`/occupancy query, `cudaMemsetAsync` | 296.7 ms/step of CPU, but **0% of wall clock today** (GPU 98.73% busy). Do it for CUDA-graph capture and future headroom, not for throughput                                                 | —          | S    |
 
 A1 bought nothing on its own (*The GEMM headroom is not an algorithm choice*) and A2, built on it,
 bought +0.35% — but the seam they laid is what A3 then cashed for **+4.07%**, five times what
@@ -1234,13 +1237,13 @@ follow-on that shares one per-tensor scale and is therefore not.
 
 ### B. Numerics gate — bigger, and they need C
 
-| # | item | measured price | depends on | size |
-|---|---|---|---|---|
-| ~~**B1**~~ | ~~**Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass~~ — **built 2026-08-31, `--nvfp4-scaling delayed`** | ≤148 ms/step (4.1%) direct, **still not measured end to end** — but C6 measured the *fp8* counterpart `--fp8-scaling delayed` as free at this horizon, which raises the prior; B2/B4 unblocked | — | M |
-| **B2** | **Fuse the quantize into its producer** so `x` is never re-read in bf16 | the ~68 ms glue gap against fp8; both quantize kernels are at 76-85% DRAM, so bytes are the currency | B1 | L |
-| **B0** | **Hadamard-rotate the *forward*, rotations cancelling across the GEMM** — `(X·H)(H^T·W^T) = X·W^T`, so it is free arithmetically and flattens the outliers that drive the 16-element block scales. The forward quantizes unrotated today (`quant_fp4`, `nvfp4.py:145,149`); RHT is backward-only. Reuses `rht128_quant_eden`; both operands must come from the rht128 family | **the −0.0132 C8 prices**, the largest measured number on either list. Speed cost unmeasured | — | M |
-| **B3** | **Hold the RHT sign pattern across the grad-accum window**, re-randomizing per optimizer step | makes `rht128_requant(w)` cacheable — the withdrawn "+21%" claim in *Where the speed comes from* | — | **S** |
-| **B4** | **Fold the eden scratch round-trip** (bf16 scales written, read back, rewritten as fp8) | 35.3 ms + 7,744 launches + most of A6's `cudaMemset` | B1 | M |
+| #          | item                                                                                                                                                                                                                                                                                                                                                                         | measured price                                                                                                                                                                                 | depends on | size  |
+|------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------|-------|
+| ~~**B1**~~ | ~~**Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass~~ — **built 2026-08-31, `--nvfp4-scaling delayed`**                                                                                                                                                                                                                                          | ≤148 ms/step (4.1%) direct, **still not measured end to end** — but C6 measured the *fp8* counterpart `--fp8-scaling delayed` as free at this horizon, which raises the prior; B2/B4 unblocked | —          | M     |
+| **B2**     | **Fuse the quantize into its producer** so `x` is never re-read in bf16                                                                                                                                                                                                                                                                                                      | the ~68 ms glue gap against fp8; both quantize kernels are at 76-85% DRAM, so bytes are the currency                                                                                           | B1         | L     |
+| **B0**     | **Hadamard-rotate the *forward*, rotations cancelling across the GEMM** — `(X·H)(H^T·W^T) = X·W^T`, so it is free arithmetically and flattens the outliers that drive the 16-element block scales. The forward quantizes unrotated today (`quant_fp4`, `nvfp4.py:145,149`); RHT is backward-only. Reuses `rht128_quant_eden`; both operands must come from the rht128 family | **the −0.0132 C8 prices**, the largest measured number on either list. Speed cost unmeasured                                                                                                   | —          | M     |
+| **B3**     | **Hold the RHT sign pattern across the grad-accum window**, re-randomizing per optimizer step                                                                                                                                                                                                                                                                                | makes `rht128_requant(w)` cacheable — the withdrawn "+21%" claim in *Where the speed comes from*                                                                                               | —          | **S** |
+| **B4**     | **Fold the eden scratch round-trip** (bf16 scales written, read back, rewritten as fp8)                                                                                                                                                                                                                                                                                      | 35.3 ms + 7,744 launches + most of A6's `cudaMemset`                                                                                                                                           | B1         | M     |
 
 B1 was **Python-only** as predicted: `four_six_fp4_kernel` takes the amax as a read-only device
 pointer and `quant_fp4` already accepted an `amax=` override nothing passed, so it is
@@ -1252,16 +1255,16 @@ upside — do it early, but it *is* a change to the gradient estimator.
 
 ### C. The shipping gate, which nothing above clears
 
-| # | item | why | size |
-|---|---|---|---|
-| ~~**C1**~~ | ~~Eight paired seeds, `--nvfp4` against `--fp8`~~ — **done 2026-08-19: clears, weakly.** +0.005866 ± 0.009610, 5+/3−, leave-one-out robust. See *Numerics: C1* above | 2.0 h |
-| ~~**C2**~~ | ~~A horizon run at the real token budget~~ — **done 2026-08-19: +0.0137 bpb at ratio 12**, both seeds agreeing to 7e-5, monotone and still widening. But 19.9% faster makes it **~break-even at equal wall clock**, not experiment 25's 4x loss. See *Numerics: C2* | 5.5 h |
-| **C3** | **Re-scope against C6's faster fp8 before running this.** At d12 the margin it was meant to price is gone (1.015x), so the experiment is now a d24 one. **The equal-wall-clock pair — the decision experiment.** `--nvfp4 --num-iterations 3020` against `--fp8 --num-iterations 2520`, same wall clock to ~1%. C2's break-even verdict rests on extrapolating a decaying slope 500 steps; this measures it. Note the LR schedule derives from `num_iterations`, so the nvfp4 arm is a *different* schedule, which is the honest comparison but not a controlled one | ~3.5 h |
-| **C4** | **CORE at more seeds.** C2 left CORE unresolved — the two deltas disagree by 0.0213 against an nvfp4 seed spread of 0.0171. It is the only axis that can still move C2's verdict, and 2 seeds cannot see it | ~3.5 h |
-| ~~**C5**~~ | ~~Does NVIDIA's recipe close C2's deficit?~~ — **done 2026-09-03: no, it closes 17%.** `--nvfp4-exclude lm_head --nvfp4-exclude-precision fp8-fwd` leaves **+0.0114** against fp8 and shifts the curve without flattening it, so the d12 cost is block forward noise, not the head. `--warmdown-ratio 0.2` is a loss at this horizon for both precisions. See *Numerics: C5* | 8.7 h |
-| ~~**C6**~~ | ~~Block exclusion, and can fp8 go faster?~~ — **done 2026-09-03.** `--fp8-scaling delayed --wgrad-nt` is **free** (+0.000395 bpb, −15% wall clock), which **erases NVFP4's speed advantage at d12** and retires C2's break-even verdict. `--nvfp4-bf16-blocks 2,4` closes 37% cumulatively and is the first lever to *attenuate* the deficit's growth rather than offset it. See *Numerics: C6* | 3.3 h |
-| ~~**C7**~~ | ~~Forward noise or backward bias?~~ — **done 2026-09-03: backward bias is refuted.** `--nvfp4-bwd-source bf16` is the **worst arm on record** (+0.0200, growth +0.0126 against plain's +0.0138/+0.0076): the unbiased backward costs 4x what the lm_head recipe gains. TE's double-quantization rationale does not hold, and the probe's gradient columns anti-predict bpb. See *Numerics: C7* | 1.6 h |
-| ~~**C8**~~ | ~~The forward main effect, cleanly.~~ — **done 2026-09-03: the fp4 forward is the deficit.** All 73 Linears in `fp8-fwd` against C7's identical backward isolates forward precision: **−0.0132**, monotone and still widening, i.e. more than the whole plain deficit. Lands at +0.0067 while carrying C7's harmful backward. **Promotes the Hadamard-rotated forward ahead of stochastic rounding.** See *Numerics: C8* | 1.7 h |
+| #          | item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | why    | size |
+|------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|------|
+| ~~**C1**~~ | ~~Eight paired seeds, `--nvfp4` against `--fp8`~~ — **done 2026-08-19: clears, weakly.** +0.005866 ± 0.009610, 5+/3−, leave-one-out robust. See *Numerics: C1* above                                                                                                                                                                                                                                                                                                                                                                                                 | 2.0 h  |
+| ~~**C2**~~ | ~~A horizon run at the real token budget~~ — **done 2026-08-19: +0.0137 bpb at ratio 12**, both seeds agreeing to 7e-5, monotone and still widening. But 19.9% faster makes it **~break-even at equal wall clock**, not experiment 25's 4x loss. See *Numerics: C2*                                                                                                                                                                                                                                                                                                  | 5.5 h  |
+| **C3**     | **Re-scope against C6's faster fp8 before running this.** At d12 the margin it was meant to price is gone (1.015x), so the experiment is now a d24 one. **The equal-wall-clock pair — the decision experiment.** `--nvfp4 --num-iterations 3020` against `--fp8 --num-iterations 2520`, same wall clock to ~1%. C2's break-even verdict rests on extrapolating a decaying slope 500 steps; this measures it. Note the LR schedule derives from `num_iterations`, so the nvfp4 arm is a *different* schedule, which is the honest comparison but not a controlled one | ~3.5 h |
+| **C4**     | **CORE at more seeds.** C2 left CORE unresolved — the two deltas disagree by 0.0213 against an nvfp4 seed spread of 0.0171. It is the only axis that can still move C2's verdict, and 2 seeds cannot see it                                                                                                                                                                                                                                                                                                                                                          | ~3.5 h |
+| ~~**C5**~~ | ~~Does NVIDIA's recipe close C2's deficit?~~ — **done 2026-09-03: no, it closes 17%.** `--nvfp4-exclude lm_head --nvfp4-exclude-precision fp8-fwd` leaves **+0.0114** against fp8 and shifts the curve without flattening it, so the d12 cost is block forward noise, not the head. `--warmdown-ratio 0.2` is a loss at this horizon for both precisions. See *Numerics: C5*                                                                                                                                                                                         | 8.7 h  |
+| ~~**C6**~~ | ~~Block exclusion, and can fp8 go faster?~~ — **done 2026-09-03.** `--fp8-scaling delayed --wgrad-nt` is **free** (+0.000395 bpb, −15% wall clock), which **erases NVFP4's speed advantage at d12** and retires C2's break-even verdict. `--nvfp4-bf16-blocks 2,4` closes 37% cumulatively and is the first lever to *attenuate* the deficit's growth rather than offset it. See *Numerics: C6*                                                                                                                                                                      | 3.3 h  |
+| ~~**C7**~~ | ~~Forward noise or backward bias?~~ — **done 2026-09-03: backward bias is refuted.** `--nvfp4-bwd-source bf16` is the **worst arm on record** (+0.0200, growth +0.0126 against plain's +0.0138/+0.0076): the unbiased backward costs 4x what the lm_head recipe gains. TE's double-quantization rationale does not hold, and the probe's gradient columns anti-predict bpb. See *Numerics: C7*                                                                                                                                                                       | 1.6 h  |
+| ~~**C8**~~ | ~~The forward main effect, cleanly.~~ — **done 2026-09-03: the fp4 forward is the deficit.** All 73 Linears in `fp8-fwd` against C7's identical backward isolates forward precision: **−0.0132**, monotone and still widening, i.e. more than the whole plain deficit. Lands at +0.0067 while carrying C7's harmful backward. **Promotes the Hadamard-rotated forward ahead of stochastic rounding.** See *Numerics: C8*                                                                                                                                             | 1.7 h  |
 
 C1, C2 (2026-08-19), C5-C8 (2026-09-03) are run; **C3 and C4 are what is left of the original
 gate, and C6 has changed what C3 would measure.** The rule below
@@ -1280,11 +1283,11 @@ C2 is affordable at (ratio 12 is 1.32B tokens at d12 against 3.48B at d20).
 - **The NVFP4 arm is *not* run-to-run reproducible, and `--fp8` is.** Settled by five 3-step
   d12/dbs 8/2-GPU arms (`dev-ignore/determ-check/`):
 
-| pair | step 0 | step 1 | step 2 | |
-|---|---|---|---|---|
-| `--nvfp4 --seed 42` x2 | 10.397527 = | 10.384410 = | 10.362745 vs 10.362743 | **diverges** |
-| `--fp8 --seed 42` x2 | 10.397516 = | 10.384375 = | 10.362544 = | deterministic |
-| `--nvfp4 --seed 43` | 10.396896 ≠ | — | — | seed control passes |
+| pair                   | step 0      | step 1      | step 2                 |                     |
+|------------------------|-------------|-------------|------------------------|---------------------|
+| `--nvfp4 --seed 42` x2 | 10.397527 = | 10.384410 = | 10.362745 vs 10.362743 | **diverges**        |
+| `--fp8 --seed 42` x2   | 10.397516 = | 10.384375 = | 10.362544 =            | deterministic       |
+| `--nvfp4 --seed 43`    | 10.396896 ≠ | —           | —                      | seed control passes |
 
 *The weight cache*'s claim stands: the backward's fresh Hadamard rotation and EDEN seeds are not
 reproducible, notwithstanding that `new_seed()` is a `torch.randint` off the CPU RNG
@@ -1303,12 +1306,12 @@ C2.**
 
 ### D. Bookkeeping
 
-| # | item |
-|---|---|
-| ~~**D1**~~ | ~~Re-measure the *Result* table on the current tree~~ — **done 2026-08-18.** Five arms, d20/dbs 4, repeat spread 0.31%: NVFP4 is **+29.4% over `--fp8`** and **+59.8% over bf16**. The 1.25x it replaces was already post-window-fix, so the move is A1-A3, not the window. See *Result* |
-| ~~**D2**~~ | ~~Commit the pending `dev/nvfp4-quartet.md` and `scripts/kernel_report.py`~~ — **done**, `cf5b41f` |
+| #          | item                                                                                                                                                                                                                                                                                                                       |
+|------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ~~**D1**~~ | ~~Re-measure the *Result* table on the current tree~~ — **done 2026-08-18.** Five arms, d20/dbs 4, repeat spread 0.31%: NVFP4 is **+29.4% over `--fp8`** and **+59.8% over bf16**. The 1.25x it replaces was already post-window-fix, so the move is A1-A3, not the window. See *Result*                                   |
+| ~~**D2**~~ | ~~Commit the pending `dev/nvfp4-quartet.md` and `scripts/kernel_report.py`~~ — **done**, `cf5b41f`                                                                                                                                                                                                                         |
 | ~~**D3**~~ | ~~Measure the stack as one arm~~ — **done 2026-08-18**, same batch as D1: **+7.01%** (37,532 vs 35,073), against ~+6.3% from chaining the marginals, which therefore under-counted. It also priced what nothing had: **plain NVFP4 with the stack off is +21.0% over `--fp8`**, so the stack is secondary to the fp4 GEMMs |
-| **D4** | **Re-measure the d12 arms too.** D1 covered d20 only, so the original +7.0%/~+29% headline — d12/dbs 4, pre-window-fix — has no current-tree replacement. Same batch shape, ~40 min |
+| **D4**     | **Re-measure the d12 arms too.** D1 covered d20 only, so the original +7.0%/~+29% headline — d12/dbs 4, pre-window-fix — has no current-tree replacement. Same batch shape, ~40 min                                                                                                                                        |
 
 ### Ruled out by measurement
 

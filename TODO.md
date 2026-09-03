@@ -8,12 +8,12 @@ flags exist in the sibling fork `/remote/projects/pycharm/sm120_nanochat`, branc
 read them with `git -C /remote/projects/pycharm/sm120_nanochat show refactor:<path>`. Its
 `dev/perf-log.md` and `dev/perf-log-experiments.md` carry the measurements below.
 
-| flag | d12 | d16 | needs | notes |
-|---|---|---|---|---|
-| `--pin-gemm all` | +6.0% | +0.8% | — | ext now in-tree; −512 MiB; collapses with depth |
-| `--fp8-weight-cache` | +1.0% | +1.5% | — | Python-only; +218–448 MiB |
-| `--fuse-wgrad-accum` | +0.7–1.9% | +1.4% | — | ext now in-tree; TE's `fuse_wgrad_accumulation` |
-| `--muon-autotune` | +0.7% | +0.7% | — | precision-independent; `--nvfp4` can take it too |
+| flag                 | d12       | d16   | needs | notes                                            |
+|----------------------|-----------|-------|-------|--------------------------------------------------|
+| `--pin-gemm all`     | +6.0%     | +0.8% | —     | ext now in-tree; −512 MiB; collapses with depth  |
+| `--fp8-weight-cache` | +1.0%     | +1.5% | —     | Python-only; +218–448 MiB                        |
+| `--fuse-wgrad-accum` | +0.7–1.9% | +1.4% | —     | ext now in-tree; TE's `fuse_wgrad_accumulation`  |
+| `--muon-autotune`    | +0.7%     | +0.7% | —     | precision-independent; `--nvfp4` can take it too |
 
 Marginals do not add — the donor's six compound to +22.7% against +18.1% measured at d16. The
 full stack measured **240,038 tok/s** at d12/dbs 8/2 GPU against 180,890 with none of it.
