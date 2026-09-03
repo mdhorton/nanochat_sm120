@@ -891,6 +891,314 @@ conclusion by analogy.
 direct experiment is one equal-wall-clock pair — `--nvfp4` at 3,020 steps against `--fp8` at 2,520
 — which answers the question instead of modelling it. Queue C3.
 
+## Numerics: C5, the recipe — lm_head is not where the deficit lives, and 80/20 is a loss
+
+**5 arms at the ratio-12 horizon (2,520 steps), 2026-09-03, `dev-ignore/overnight/c5/`.**
+d12 / dbs 8 / 2 GPU / seed 42, C2's protocol exactly (`--total-batch-size 524288 --eval-every 250
+--eval-tokens 2097152`). Two of the five re-measure C2's own arms, because **C2 was run in the
+sibling checkout** (`sm120_nanochat`, branch `quartet-te`) which has no `nvfp4_numerics.py` — its
+constants are a cross-tree reference, not a within-tree one.
+
+| arm | flags beyond the base | bpb | min |
+|---|---|---|---|
+| `fp8-w65` | `--fp8` | **0.833176** | 112.35m |
+| `nvfp4-plain-w65` | `--nvfp4` | **0.846993** | 94.05m |
+| `nvfp4-recipe-w65` | `+ --nvfp4-exclude lm_head --nvfp4-exclude-precision fp8-fwd` | **0.844619** | 95.83m |
+| `fp8-w20` | `--fp8 --warmdown-ratio 0.2` | **0.840602** | 112.21m |
+| `nvfp4-recipe-w20` | recipe `+ --warmdown-ratio 0.2` | **0.853487** | 95.83m |
+
+**The parity check passes.** The plain deficit reproduces at **+0.013817** against C2's +0.013689
+(s42) and +0.013762 (s43), and the trajectory tracks C2 step for step: +0.0090 / +0.0105 / +0.0119
+/ +0.0138 at 500 / 1000 / 2000 / 2500, against C2's +0.0071 / +0.0105 / +0.0120 / +0.0137. Both
+w65 arms land ~2e-4 *below* their C2 counterparts (fp8 −0.000245, nvfp4 −0.000117) — real
+cross-tree drift, ~60x C2's 4e-6 fp8 seed spread, and visible at step 2 as 10.362546 here against
+10.362545 there. It cancels in every paired delta, which is what the pairings use.
+
+### The four pairings
+
+| pair | delta | reading |
+|---|---|---|
+| recipe w65 − fp8 w65 | **+0.011443** | the recipe closes 17% of the deficit and leaves 83% |
+| recipe w65 − plain w65 | **−0.002374** | the recipe's gain in isolation |
+| fp8 w20 − fp8 w65 | **+0.007426** | 80/20 costs fp8 three times what the recipe buys |
+| recipe w20 − fp8 w20 | **+0.012885** | the deficit is *worse* under NVIDIA's schedule |
+
+**The recipe shifts the curve, it does not flatten it** — the distinction that decides what the
+result means. Its gain is flat across training (0.0036 / 0.0026 / 0.0027 / 0.0020 / 0.0022 at
+500 → 2500) while the deficit underneath keeps widening at the same rate as plain NVFP4's. Taking
+lm_head out of fp4 removes a roughly constant offset; it does not touch the compounding
+systematic. **So the cost at d12 is forward noise in the blocks, not the output head** — which is
+the C2 decision rule's third branch, and it lands there despite lm_head being a quarter of d12's
+linear compute.
+
+**And it is nearly free in time**, which is the one unambiguously good result: 95.83m against
+plain's 94.05m, 1.8 min for 0.0024 bpb, at 1.172x fp8's wall clock. The `fp8-fwd` path costs
+about what its flag help predicted (17.9 ms against 15.6 all-fp4 at the d12 lm_head shape).
+
+**80/20 is a loss at this horizon, for both precisions** (fp8 +0.0074, recipe +0.0089), and it
+does not rescue the recipe — the deficit *grows* to +0.0129. The 100-step d24 pair that suggested
+otherwise (fp8 1.302880, nvfp4 1.288498) was inside noise, as its own note said. Note the w20 arms
+are still descending steeply at the last eval (fp8 0.8906 → 0.8412 over the final 500 steps
+against w65's 0.8557 → 0.8337), so 80/20 is a schedule built for a longer horizon than ratio 12;
+this measures it at the horizon we train at, not at the one NVIDIA does.
+
+### Configuration note — `NANOCHAT_FA2_SWINDOW=1` is load-bearing for *numerics*, not only speed
+
+C2 ran with it; the first c5 launch did not, and the difference is not confined to wall clock
+(2.71 vs 4.38 s/step, 33.2% vs 20.5% MFU — 3 of every 4 layers are windowed under `SSSL`). The
+SDPA mask path changes the arithmetic: step-1 loss 10.384376 against 10.384375 with FA2. Batch
+relaunched with it set; all five arms carry `✓ FA2 windowed flash attention` in their logs.
+
+**A determinism claim made here on 2026-09-03 was wrong and is withdrawn.** Two 3-step `--fp8
+--seed 42` runs diverged under SDPA (10.362544 vs 10.362545) and agreed under FA2, which was
+written up as "bitwise deterministic under FA2". Three steps cannot support that:
+`dev/LOG_sm120.md:27-31` already records that `--fp8` at d12/dbs8/2 GPU agrees at steps 0-2 and
+*then* drifts, reaching 7.4e-5 by step 19 (suspected DDP reduction order), and warns in terms that
+the donor's 3-step determinism table was too short to see it. The check repeated that mistake.
+**Neither precision is bit-reproducible here**; SDPA merely surfaces the drift ~17 steps earlier.
+What licenses the paired comparisons is not determinism but the measured replicate null at this
+horizon — mean 0.00033, max 0.00073 (*Numerics: C1*) with the C2 fp8 seeds agreeing to 4e-6 —
+which resolves anything above ~0.001.
+
+### What C5 leaves
+
+The recipe is not adoptable on its own at d12: +0.0114 sits outside the 0.003 band the arm plan
+set for adoption, and outside the 0.003-0.010 band where the remaining recipe levers would be
+worth a batch each. `--nvfp4-bf16-blocks` is still worth one arm — it attacks the block
+forwards, which is where C5 says the cost actually is, unlike the lm_head exclusion. ~~`--nvfp4-scaling
+delayed` and `--nvfp4-bwd-source bf16` are backward-side and C5 gives no reason to expect them to
+move a forward-noise deficit.~~ **That dismissal assumed its conclusion** — see *Numerics: C6*,
+which shows `fp8-fwd` changes the backward operand source as well as the forward precision, so C5
+never isolated the forward at all. ~~**Value-level stochastic rounding in the forward is the lever this points at**~~ — the target was
+right, the ranking was not: *Numerics: C8* prices the forward at −0.0132 and puts the
+**Hadamard-rotated forward** ahead of SR (free, existing kernels, no bias/variance tradeoff).
+
+Keep the recipe flags regardless of adoption: −0.0024 bpb for +1.9% wall clock is the best
+exchange rate on either list.
+
+## Numerics: C6 — an optimized fp8 erases NVFP4's speed advantage at d12
+
+**2 arms at the ratio-12 horizon (2,520 steps), 2026-09-03, `dev-ignore/overnight/c6/`.**
+C5's protocol exactly, so both pair against c5 arms in the same tree and session.
+
+| arm | flags beyond the base | bpb | vs `c5-fp8-w65` | min | peak |
+|---|---|---|---|---|---|
+| `fp8-delayed-nt-w65` | `--fp8 --fp8-scaling delayed --wgrad-nt` | **0.833571** | **+0.000395** | 95.46 | 10.6 GB |
+| `nvfp4-recipe-blocks24-w65` | recipe `+ --nvfp4-bf16-blocks 2,4` | **0.841941** | **+0.008765** | 100.09 | 11.5 GB |
+
+### Delayed fp8 scaling plus NT wgrad is free — and that is the headline
+
+**+0.000395 bpb for 15% less wall clock** (95.46 against `c5-fp8-w65`'s 112.35) and 0.8 GB less
+memory. The delta is flat across the run — +0.0004 at step 750, +0.0004 at 2520 — so unlike the
+NVFP4 deficit it does not compound, and it sits at the edge of the ~0.001 the replicate null can
+resolve. Treat it as neutral.
+
+This kills a contradiction the 50-step README tables could never settle: they read +0.0134/+0.0187
+(worse) at d24 and −0.0093/−0.0130 (better) at d12, i.e. one noise unit in each direction. The
+donor's experiment 10 (`dev/LOG_sm120.md:17-19`) claimed −0.022 over 8 paired seeds. The truth at
+d12/ratio 12 is **zero**, which no 50-step run could have seen. Note this is `--fp8-scaling`;
+**queue B1 is the NVFP4 counterpart `--nvfp4-scaling delayed` and remains unmeasured end to end**,
+though this raises the prior that it too is cheap.
+
+**The consequence for NVFP4 is the real result.** The fp8 baseline is now faster than every NVFP4
+arm on record at d12:
+
+| config | min | vs best fp8 | bpb deficit |
+|---|---|---|---|
+| `fp8-delayed-nt` | 95.46 | — | — |
+| `nvfp4-plain` | 94.05 | 1.015x | +0.0138 |
+| `nvfp4-recipe` | 95.83 | 0.996x | +0.0114 |
+| `nvfp4-recipe-blocks24` | 100.09 | 0.954x | +0.0088 |
+
+**C2's "break-even at equal wall clock" does not survive.** That verdict rested on NVFP4 being
+1.199x faster, buying ~500 extra steps to spend on the deficit. Against an optimized fp8 the
+margin is 1.015x for the arm carrying the full +0.0138, and every configuration that narrows the
+deficit is *slower* than fp8. At d12 there is no wall-clock budget left to buy the deficit back.
+
+This is depth-specific and does not transfer: the same README rows put NVFP4 at 585k against
+optimized fp8's 482k at d24 (1.21x), because bigger GEMMs use fp4 better. **d12 is now settled
+against NVFP4; d24 is where the economics could still work**, and it is 8,352 steps at ratio 12
+(batch 1,048,576, 8.76B tokens) or 13,920 at ratio 20.
+
+### Block exclusion is the first lever that attenuates rather than offsets
+
+`--nvfp4-bf16-blocks 2,4` on top of the recipe — first 2 and last 4 blocks plus lm_head in
+fp8-fwd, 36 of 80 Linears left in fp4 — closes **37% of the deficit** cumulatively (+0.013817 ->
++0.008765), against the recipe's 17% alone.
+
+The trajectory is what distinguishes it from C5. The recipe's gain was flat; this one **grows**
+(−0.0002 at step 250, −0.0012 at 750, −0.0024 at 1500, −0.0028 at 2500), and the deficit's growth
+rate is roughly halved:
+
+| arm | deficit @250 | @2520 | growth |
+|---|---|---|---|
+| plain | +0.006221 | +0.013817 | +0.007596 |
+| recipe | +0.005261 | +0.011443 | +0.006182 |
+| **+ blocks 2,4** | **+0.005041** | **+0.008765** | **+0.003724** |
+
+Halving the fp4 block count roughly halves the growth. A two-point linear fit gives ~0.00042 per
+fp4 block with a ~0.0012 intercept, i.e. the compounding term looks proportional to the number of
+fp4 blocks, with a residual that is not.
+
+C5's probe→bpb calibration held: predicted −0.0019 for this step, measured −0.002678, so the probe
+understates by ~40% but ranks correctly. That makes `scripts/probe_nvfp4_numerics.py` a usable
+minutes-long screen for future candidates.
+
+### The confound — C5 and C6 never isolated the forward
+
+`--nvfp4-exclude-precision fp8-fwd` changes **two** things on the excluded layers: an fp8 forward
+*and* a bf16-sourced NVFP4 backward (`dev/nvfp4-transformer-engine.md:118-121`). So neither C5's
+−0.0024 nor C6's −0.0027 attributes to forward precision on its own, and the claim in *What C5
+leaves* that "forward noise in the blocks is the cost" is not established by these arms.
+
+The alternative looked equally good at the time. The ladder in
+`nvfp4-transformer-engine.md:135-141` shows `--nvfp4-bwd-source bf16` is the only lever that makes
+the backward an unbiased estimator (1.00/0.90 bits per 4x averaging against the default's
+0.29/0.54, because the default re-quantizes saved fp4 operands and "is biased against the true
+gradient"). A biased gradient estimator is exactly what would produce a compounding deficit, so
+C6's halved growth rate seemed equally explained by six fewer biased backwards as by six fewer
+fp4 forwards.
+
+**C7 refuted that the same day** — the unbiased backward is *worse*, by more than the whole recipe
+gains (see *Numerics: C7*). Since C6's excluded layers took an fp8 forward **plus** a backward
+change now known to be harmful, C6's −0.0027 has to come from the forward, and understates it.
+That inference is sound for C6's gain specifically, and *Numerics: C8* then established the
+general claim directly — the forward main effect at fixed backward is −0.0132, more than the whole
+plain deficit. What is still unmeasured is the fp4 backward's own share: every arm on record has
+fp4 backward GEMMs, and no flag gives a high-precision backward under an fp4 forward.
+
+## Numerics: C7 — the unbiased backward is the worst arm in the series
+
+**1 arm at the ratio-12 horizon (2,520 steps), 2026-09-03, `dev-ignore/overnight/c7/`.**
+`--nvfp4 --nvfp4-bwd-source bf16`, C5's protocol, 96.44m, 14.9 GB peak (+0.9 over plain).
+Designed to break C5/C6's confound: it changes only where the backward's fp4 operands are
+quantized *from*, leaving the forward bit-identical — verified, step-0 loss 10.397527 matches
+plain NVFP4 exactly.
+
+| arm | bpb | deficit vs fp8 | growth 250->2520 |
+|---|---|---|---|
+| `c5-fp8-w65` | 0.833176 | — | — |
+| `c5-nvfp4-plain-w65` | 0.846993 | +0.013817 | +0.007596 |
+| `c5-nvfp4-recipe-w65` | 0.844619 | +0.011443 | +0.006182 |
+| `c6-...-blocks24-w65` | 0.841941 | +0.008765 | +0.003724 |
+| **`c7-nvfp4-bwdbf16-w65`** | **0.853135** | **+0.019959** | **+0.012614** |
+
+**It is 44% worse than plain NVFP4** (+0.0200 against +0.0138), and the damage is in the
+compounding term: growth two-thirds *higher* than plain, the mirror image of blocks-2,4 halving
+it. The gap opens monotonically from step 1000 (+0.0010, +0.0029, +0.0034, +0.0055, +0.0063,
++0.0064) — an order of magnitude past the replicate null, so not noise.
+
+### Three things this settles
+
+**TE's "avoid double quantization errors" does not hold here.** Quantizing the backward operands
+from bf16 instead of requantizing the saved fp4 costs more than the entire lm_head recipe gains,
+four times over. Quartet-II's choice is load-bearing, not incidental.
+
+**Forward/backward consistency beats fidelity to bf16.** The default differentiates the function
+the forward actually computed; bwd-source bf16 differentiates the un-quantized function. Unbiased
+against bf16 but inconsistent with its own forward is worse than biased against bf16 and
+consistent — and it compounds, which is what a systematic gradient mismatch accumulating over
+2,520 steps should do.
+
+**The probe's gradient columns anti-predict bpb.** This was its best variant by a wide margin
+(1.00/0.90 bits per 4x against the default's 0.29/0.54) and it is the worst run on record. The
+forward `dloss` column has now called C5, C6 and C7 correctly; the backward columns have one clean
+miss. **Use `scripts/probe_nvfp4_numerics.py` as a forward screen only.** Its "the backward levers
+do not move the model-level numbers" claim rests on the forward-only variant having identical
+`dloss` — but `dloss` is a forward metric at a fixed checkpoint, so the backward cannot move it by
+construction. That is tautological, not evidence.
+
+### What is still unmeasured
+
+**The fp4 backward's own contribution to the deficit.** The 2x2 is:
+
+| | fp4-source bwd | bf16-source bwd |
+|---|---|---|
+| fp4 forward | plain, +0.0138 | **C7, +0.0200** |
+| fp8 forward | not expressible | **C8, +0.0067** |
+
+Every cell runs fp4 backward GEMMs, and "fp8 forward with the fp4-source backward" cannot be
+built: the backward requantizes the operands the forward saved, so if the forward is not fp4 there
+is nothing to requantize. Forward precision and backward source are coupled by construction —
+which is why C5 and C6 moved both at once.
+
+**C7's right-hand column is what makes C8 readable**: both run
+`_FP8FwdMatmul.backward`'s settings (`rht="all", bwd_source="bf16"`, `nvfp4_fp8fwd.py:47-52`), so
+C8 − C7 varies the forward alone. That contrast is *Numerics: C8* and it is −0.0132. What remains
+unmeasured is the empty cell — the fp4 backward's own share — which needs a bf16 backward mode in
+`_NVFP4Matmul.backward` (~an afternoon) to fill directly rather than bound.
+
+## Numerics: C8 — the fp4 forward carries the deficit, and it is worth more than all of it
+
+**1 arm at the ratio-12 horizon (2,520 steps), 2026-09-03, `dev-ignore/overnight/c8/`.**
+`--nvfp4 --nvfp4-exclude c_q,c_k,c_v,c_proj,c_fc,lm_head --nvfp4-exclude-precision fp8-fwd` —
+suffix matching puts all 73 convertible Linears in fp8-fwd, 0/80 left as `NVFP4Linear`. 104.06m,
+12.0 GB peak. **0.839906.**
+
+Designed as the other half of C7. `_FP8FwdMatmul.backward` hardcodes `rht="all",
+bwd_source="bf16"` (`nvfp4_fp8fwd.py:47-52`), which is exactly what C7 ran model-wide, so **C8 − C7
+varies the forward GEMM precision and nothing else** — the isolation C5 and C6 could not give,
+because `fp8-fwd` couples the two. Verified at startup: step-0 loss 10.397516, the fp8 value, not
+NVFP4's 10.397527.
+
+| arm | bpb | deficit vs fp8 | growth 250->2520 | fp4 block forwards |
+|---|---|---|---|---|
+| `c5-fp8-w65` | 0.833176 | — | — | — |
+| `c5-nvfp4-plain-w65` | 0.846993 | +0.013817 | +0.007596 | 12 |
+| `c5-nvfp4-recipe-w65` | 0.844619 | +0.011443 | +0.006182 | 12 |
+| `c6-...-blocks24-w65` | 0.841941 | +0.008765 | +0.003724 | 6 |
+| `c7-nvfp4-bwdbf16-w65` | 0.853135 | +0.019959 | +0.012614 | 12 |
+| **`c8-nvfp4-fp8fwd-all-w65`** | **0.839906** | **+0.006730** | **+0.003300** | **0** |
+
+### The forward main effect is −0.0132, and it compounds
+
+C8 − C7 at each eval: −0.0039, −0.0034, −0.0031, −0.0053, −0.0074, −0.0095, −0.0105, −0.0119,
+−0.0121, −0.0133, **−0.013229 at 2520**. Monotone from step 750 and still widening at the end.
+
+**Swapping fp4 → fp8 in the forward recovers more than the entire plain-NVFP4 deficit** (+0.0138).
+That settles what C5 asked and could not isolate: the cost is the fp4 forward. Not lm_head
+(−0.0024 in C5), and emphatically not the backward operand source, which is worth −0.0062 in the
+*wrong* direction (C7).
+
+### Growth rate is roughly proportional to fp4 forward count
+
+| fp4 block forwards | arm | growth |
+|---|---|---|
+| 12 | plain | +0.007596 |
+| 6 | blocks 2,4 | +0.003724 |
+| 0 | C8 | +0.003300 |
+
+C6's two-point fit predicted ~0.0012 at zero blocks; C8 came in at 0.0033. The overshoot is
+plausibly the bf16-source backward C8 carries — C7 shows that lever alone raises growth from
++0.0076 to +0.0126. So the compounding term looks like *fp4 forward count plus a backward-source
+penalty*, and C8 is paying the second while having eliminated the first.
+
+### C8 is the best NVFP4 arm on record — while handicapped
+
++0.0067 against fp8, carrying a backward C7 measured at +0.0062 of self-inflicted damage. Those
+need not be additive, but if they are even roughly so, **an fp8 forward over the default
+fp4-source backward would land near fp8 parity**. That configuration cannot be built today (no
+saved fp4 operands to requantize), which makes it a hint about the ceiling rather than a
+candidate: it says the headroom a better fp4 forward is chasing is the full +0.0138, not some
+fraction of it.
+
+### What this justifies
+
+**The Hadamard-rotated forward moves to the front of the queue, ahead of stochastic rounding.**
+Rotating both operands cancels across the GEMM — (X·H)(H^T·W^T) = X·W^T — so it is mathematically
+free, it flattens the outliers that drive 16-element block scales, and `rht128_quant_eden` already
+exists for the backward. It attacks exactly the term C8 measured, with no bias/variance tradeoff
+to argue about. Mind the one-kernel-family-per-GEMM rule (`nvfp4_numerics.py:25-30`): a rotated
+GEMM takes both operands from the rht128 kernels.
+
+Value-level stochastic rounding stays second: same target, strictly more work, and it trades bias
+for variance rather than removing the error.
+
+**None of this rescues d12.** C8 runs 104.06m against `--fp8 --fp8-scaling delayed --wgrad-nt`'s
+95.46m, so an fp8 forward over an fp4 backward is both slower and behind at this depth. C8's value
+is diagnostic — it prices the headroom that justifies the kernel work, and the work pays off at
+d24, where NVFP4 still holds ~1.21x (*Numerics: C6*).
+
 ## Queue
 
 Everything below is priced from *Where the time goes* on a 3,639.8 ms step. Two standing warnings
@@ -928,8 +1236,9 @@ follow-on that shares one per-tensor scale and is therefore not.
 
 | # | item | measured price | depends on | size |
 |---|---|---|---|---|
-| ~~**B1**~~ | ~~**Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass~~ — **built 2026-08-31, `--nvfp4-scaling delayed`** | ≤148 ms/step (4.1%) direct, **not yet measured end to end**; B2/B4 unblocked | — | M |
+| ~~**B1**~~ | ~~**Delayed scaling** (TE's amax history), replacing the `vector_norm` pre-pass~~ — **built 2026-08-31, `--nvfp4-scaling delayed`** | ≤148 ms/step (4.1%) direct, **still not measured end to end** — but C6 measured the *fp8* counterpart `--fp8-scaling delayed` as free at this horizon, which raises the prior; B2/B4 unblocked | — | M |
 | **B2** | **Fuse the quantize into its producer** so `x` is never re-read in bf16 | the ~68 ms glue gap against fp8; both quantize kernels are at 76-85% DRAM, so bytes are the currency | B1 | L |
+| **B0** | **Hadamard-rotate the *forward*, rotations cancelling across the GEMM** — `(X·H)(H^T·W^T) = X·W^T`, so it is free arithmetically and flattens the outliers that drive the 16-element block scales. The forward quantizes unrotated today (`quant_fp4`, `nvfp4.py:145,149`); RHT is backward-only. Reuses `rht128_quant_eden`; both operands must come from the rht128 family | **the −0.0132 C8 prices**, the largest measured number on either list. Speed cost unmeasured | — | M |
 | **B3** | **Hold the RHT sign pattern across the grad-accum window**, re-randomizing per optimizer step | makes `rht128_requant(w)` cacheable — the withdrawn "+21%" claim in *Where the speed comes from* | — | **S** |
 | **B4** | **Fold the eden scratch round-trip** (bf16 scales written, read back, rewritten as fp8) | 35.3 ms + 7,744 launches + most of A6's `cudaMemset` | B1 | M |
 
@@ -947,10 +1256,15 @@ upside — do it early, but it *is* a change to the gradient estimator.
 |---|---|---|---|
 | ~~**C1**~~ | ~~Eight paired seeds, `--nvfp4` against `--fp8`~~ — **done 2026-08-19: clears, weakly.** +0.005866 ± 0.009610, 5+/3−, leave-one-out robust. See *Numerics: C1* above | 2.0 h |
 | ~~**C2**~~ | ~~A horizon run at the real token budget~~ — **done 2026-08-19: +0.0137 bpb at ratio 12**, both seeds agreeing to 7e-5, monotone and still widening. But 19.9% faster makes it **~break-even at equal wall clock**, not experiment 25's 4x loss. See *Numerics: C2* | 5.5 h |
-| **C3** | **The equal-wall-clock pair — the decision experiment.** `--nvfp4 --num-iterations 3020` against `--fp8 --num-iterations 2520`, same wall clock to ~1%. C2's break-even verdict rests on extrapolating a decaying slope 500 steps; this measures it. Note the LR schedule derives from `num_iterations`, so the nvfp4 arm is a *different* schedule, which is the honest comparison but not a controlled one | ~3.5 h |
+| **C3** | **Re-scope against C6's faster fp8 before running this.** At d12 the margin it was meant to price is gone (1.015x), so the experiment is now a d24 one. **The equal-wall-clock pair — the decision experiment.** `--nvfp4 --num-iterations 3020` against `--fp8 --num-iterations 2520`, same wall clock to ~1%. C2's break-even verdict rests on extrapolating a decaying slope 500 steps; this measures it. Note the LR schedule derives from `num_iterations`, so the nvfp4 arm is a *different* schedule, which is the honest comparison but not a controlled one | ~3.5 h |
 | **C4** | **CORE at more seeds.** C2 left CORE unresolved — the two deltas disagree by 0.0213 against an nvfp4 seed spread of 0.0171. It is the only axis that can still move C2's verdict, and 2 seeds cannot see it | ~3.5 h |
+| ~~**C5**~~ | ~~Does NVIDIA's recipe close C2's deficit?~~ — **done 2026-09-03: no, it closes 17%.** `--nvfp4-exclude lm_head --nvfp4-exclude-precision fp8-fwd` leaves **+0.0114** against fp8 and shifts the curve without flattening it, so the d12 cost is block forward noise, not the head. `--warmdown-ratio 0.2` is a loss at this horizon for both precisions. See *Numerics: C5* | 8.7 h |
+| ~~**C6**~~ | ~~Block exclusion, and can fp8 go faster?~~ — **done 2026-09-03.** `--fp8-scaling delayed --wgrad-nt` is **free** (+0.000395 bpb, −15% wall clock), which **erases NVFP4's speed advantage at d12** and retires C2's break-even verdict. `--nvfp4-bf16-blocks 2,4` closes 37% cumulatively and is the first lever to *attenuate* the deficit's growth rather than offset it. See *Numerics: C6* | 3.3 h |
+| ~~**C7**~~ | ~~Forward noise or backward bias?~~ — **done 2026-09-03: backward bias is refuted.** `--nvfp4-bwd-source bf16` is the **worst arm on record** (+0.0200, growth +0.0126 against plain's +0.0138/+0.0076): the unbiased backward costs 4x what the lm_head recipe gains. TE's double-quantization rationale does not hold, and the probe's gradient columns anti-predict bpb. See *Numerics: C7* | 1.6 h |
+| ~~**C8**~~ | ~~The forward main effect, cleanly.~~ — **done 2026-09-03: the fp4 forward is the deficit.** All 73 Linears in `fp8-fwd` against C7's identical backward isolates forward precision: **−0.0132**, monotone and still widening, i.e. more than the whole plain deficit. Lands at +0.0067 while carrying C7's harmful backward. **Promotes the Hadamard-rotated forward ahead of stochastic rounding.** See *Numerics: C8* | 1.7 h |
 
-C1 and C2 are both run (2026-08-19); **C3 and C4 are what is left of the gate.** The rule below
+C1, C2 (2026-08-19), C5-C8 (2026-09-03) are run; **C3 and C4 are what is left of the original
+gate, and C6 has changed what C3 would measure.** The rule below
 still governs anything from B that lands next — start a fresh battery as soon as the first
 numerics-affecting item does, not after all of them, since a failed battery over a stack of four
 changes does not say which one failed. Run it at
@@ -1003,13 +1317,24 @@ C2.**
   the opposite of `perf-log.md` experiment 23, where an ALU-bound cast gave up +3.9% to a
   division-free form. Do not repeat that here.
 - **The unconverted bf16 layers** — 2.4 ms/step.
+- **`--warmdown-ratio 0.2` (NVIDIA's 80/20 schedule)** — a loss at ratio 12 for both precisions
+  (fp8 +0.0074, nvfp4 recipe +0.0089) and it widens the deficit to +0.0129. Both arms are still
+  descending steeply at the last eval, so it is a schedule for a longer horizon than this one.
+  See *Numerics: C5*.
+- **`--nvfp4-bwd-source bf16` (TE's "quantize both orientations from the high-precision input")** —
+  +0.0200 against plain's +0.0138 and a two-thirds higher growth rate. Forward/backward
+  consistency beats fidelity to bf16 here. See *Numerics: C7*.
+- **NVFP4 at d12 on wall-clock grounds** — against `--fp8-scaling delayed --wgrad-nt` the speed
+  margin is 1.015x for the arm carrying the full deficit, and every configuration that narrows
+  the deficit is slower than fp8. See *Numerics: C6*. This is d12-specific; d24 is untested and
+  the same tables put NVFP4 at 1.21x there.
 
 ## Caveats and open work
 
 - **`scripts/bench_nvfp4.py --backward` is not trustworthy.** It scored NVFP4 at 0.63x of bf16
   over the d12 inventory while a matched `base_train.py` batch measured it faster than both bf16
   and fp8. Forward-only rankings did match. Settle throughput with `base_train.py` arms.
-- **Numerics: C1 and C2 are both run; the gate is now C3/C4.** C1 clears weakly at 100 steps
+- **Numerics: C1, C2 and C5-C8 are run; the gate is now C3/C4.** C1 clears weakly at 100 steps
   (+0.0059 ± 0.0096), C2 measures **+0.0137 bpb at ratio 12** with both seeds agreeing to 7e-5 —
   but at 19.9% faster that is **~break-even at equal wall clock**, not a kill. CORE is unresolved.
   The replicate null came back 58x below the seed spread, so future batteries can use 16 runs.
